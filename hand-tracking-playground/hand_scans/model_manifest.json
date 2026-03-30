@@ -1,0 +1,18 @@
+{
+  "hands":
+  [
+    {
+      "blender_file": "mblab/mblab_light.blend"
+    },
+    {
+      "blender_file": "golden_turtle/Blender_Arms_02_2.blend"
+    },
+    {
+      "blender_file": "open3dmodel_male_hand/open3dmodel_male_hand.blend"
+    },
+    {
+      "blender_file": "digitalrealitylab_sample/oh_no_4.blend"
+    }
+  ],
+  "version": 0
+}

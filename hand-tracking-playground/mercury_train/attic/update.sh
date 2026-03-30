@@ -1,0 +1,1 @@
+python3 ../py_generator/loadgrapher.py && python3 ../py_generator/sanitycheck_num_sequences.py && xdg-open hi.png && xdg-open num.png

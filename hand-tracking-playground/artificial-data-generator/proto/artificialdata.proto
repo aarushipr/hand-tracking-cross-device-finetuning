@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package artificialdata;
+
+// The string reversal service definition.
+service ArtificialDataNexus {
+    rpc askForSequence (sequenceRequest) returns (sequenceReply);
+    rpc goodbye(sayonara) returns (Empty);
+}
+
+message sequenceRequest {
+    int32 slot_idx = 1;
+    string proportions_json = 2;
+}
+
+message sayonara {
+    int32 slot_idx = 1;
+}
+
+// hack butwho cares
+message Empty {
+
+}
+
+
+message sequenceReply {
+    int32 num_frames = 1;
+    // actually has the values in it
+    string wristpose_csv = 2;
+    // ditto
+    string elbowpose_csv = 3; // = 2;
+    string fingerpose_csv = 4; // = 2;
+    bool use_exr_background = 5;
+    bool render_alpha = 6;
+    // hmm, do we watn
+    string hand_poses_csv = 7;
+    string camera_info_csv = 8;
+    string valid_samples_csv = 9;
+    string output_color_images_folder = 10;
+    string output_alpha_images_folder = 11;
+
+    bool dont_render = 12;
+    float framerate = 13; 
+}

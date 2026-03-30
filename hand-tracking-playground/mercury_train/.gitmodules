@@ -1,0 +1,26 @@
+# HEY! DON'T EDIT THIS FILE!
+# IF YOU WANT TO DELETE SUBMODULES, USE `git rm`.
+# IF YOU WANT TO MOVE SUBMODULES, USE `git mv`.
+# IF YOU WANT TO ADD A NEW ONE, use `git submodule add <url> <path>`.
+
+[submodule "monado"]
+	path = monado
+	url = https://gitlab.freedesktop.org/monado/monado
+	branch = mt/win32-hand-tracking-2
+	
+[submodule "hand-tracking-models"]
+	path = hand-tracking-models
+	url = https://gitlab.freedesktop.org/monado/utilities/hand-tracking-models.git
+	branch = master
+[submodule "pybind11"]
+	path = external/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "external/basalt-headers"]
+	path = external/basalt-headers
+	url = https://gitlab.com/VladyslavUsenko/basalt-headers/
+[submodule "external/stereokit-rs"]
+	path = external/stereokit-rs
+	url = git@github.com:MalekiRe/stereokit-rs.git
+[submodule "external/stereokit-sys"]
+	path = external/stereokit-sys
+	url = git@github.com:MalekiRe/stereokit-sys.git

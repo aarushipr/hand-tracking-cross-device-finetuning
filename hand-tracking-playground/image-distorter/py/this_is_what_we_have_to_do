@@ -1,0 +1,42 @@
+1. mkdir -p /tmp/render_rgb /tmp/render_alpha
+2. rm -r /tmp/render_rgb/* /tmp/render_alpha/*
+3. base_paths are render_rgb and render_alpha
+
+loop:
+4. render! 
+5. mv /tmp/render_rgb/* <filepath_rgb>
+6. mv /tmp/render_alpha/* <filepath_alpha>
+
+
+Okay so there are 5 rendered views per physical camera we're simulating:
+front left right top bottom 
+And we have 2 cameras, so 10 views.
+
+Let's always test on Frame 20.
+
+Before I started optimizing, 
+
+Unoptimized subsurf level 2: 6s
+Ditto subsurf level 1: 4s
+Ditto subsurf level 0: 0.2s
+
+
+Right I've almost got it.
+
+guys_we_like = []
+
+guys_we_like.append("Clavicle_L")
+
+guys_we_like += ["upperarm_L", "upperarm_twist_L", "lowerarm_L", "lowerarm_twist_L", "hand_L"]
+
+for i in range(1,3):
+  guys_we_like.append(f"thumb0{i}_L")
+
+for finger in ["index", "middle", "ring", "pinky"]:
+  for i in range(0,3):
+    guys_we_like.append(f"thumb0{i}_L")
+print(guys_we_like)
+
+Note that 
+
+bpy.ops.render.render(animation=True)

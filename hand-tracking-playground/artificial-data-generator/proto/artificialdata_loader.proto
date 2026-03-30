@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package artificialdata_loader;
+
+// The string reversal service definition.
+service ArtificialDataLoader {
+    rpc askForSample (sampleRequest) returns (sampleReply);
+    rpc askForNumSequences (numSequencesRequest) returns (numSequencesReply);
+}
+
+message numSequencesRequest {};
+
+message numSequencesReply {
+    uint64 num = 1;
+}
+
+message sampleRequest {
+    uint64 sequence_idx = 1;
+    uint64 frame_idx = 2;
+}
+
+
+
+message sampleReply {
+    bytes image_data = 1; // Regular row-major memory layout. Same as a cv::Mat or np.array.
+    int32 image_width_height = 2; // Images are square. This will probably be 128.
+
+    repeated float keypoints_gt_px_x = 3; // 21 of these
+    repeated float keypoints_gt_px_y = 4; // 21 of these
+    repeated float keypoints_gt_depth_rel_midpxm = 5; // 21 of these
+    
+
+    repeated float keypoints_pose_predicted_px_x = 6; // 21 of these
+    repeated float keypoints_pose_predicted_px_y = 7; // 21 of these
+    repeated float keypoints_pose_predicted_depth_rel_midpxm = 8; // 21 of these
+
+    float stereographic_radius = 9;
+
+    float homothety_scale = 10;
+    float move_overall_variance = 11;
+    float move_per_joint_variance = 12;
+
+    float sg_expand_val = 14;
+
+
+    int32 prediction_type = 16; // 0 = no prediction, 1 = use single last frame, 2 = use last two frames, 3 = use last 10 frames.
+
+    float elbow_direction_px_x_normalized = 18;
+    float elbow_direction_px_y_normalized = 19;
+    float dotprod_elbowdir_wristloc = 20;
+
+
+    bytes alpha_data = 22;
+    bool alpha_data_valid = 23;
+
+}

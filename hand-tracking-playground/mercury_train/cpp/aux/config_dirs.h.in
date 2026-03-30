@@ -1,0 +1,6 @@
+#ifndef TRAIN_CONFIG_H
+#define TRAIN_CONFIG_H
+
+#define MERCURY_TRAIN_ROOT_DIR "@MERCURY_TRAIN_ROOT_DIR@"
+
+#endif /* TRAIN_CONFIG_H */

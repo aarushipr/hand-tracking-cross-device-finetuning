@@ -1,0 +1,3 @@
+[submodule "hand"]
+	path = hand
+	url = https://gitlab.freedesktop.org/monado/utilities/hand-tracking-models

@@ -1,0 +1,12 @@
+[submodule "monado"]
+	path = monado
+	url = https://gitlab.freedesktop.org/monado/monado
+	branch = mt/win32-hand-tracking-2
+	
+[submodule "hand-tracking-models"]
+	path = hand-tracking-models
+	url = https://gitlab.freedesktop.org/monado/utilities/hand-tracking-models.git
+	branch = master
+[submodule "pybind11"]
+	path = pybind11
+	url = https://github.com/pybind/pybind11.git

@@ -1,0 +1,1 @@
+I think this came from https://open3dmodel.com/3d-models/3d-model-anatomy-realistic-male-hand_185091.html

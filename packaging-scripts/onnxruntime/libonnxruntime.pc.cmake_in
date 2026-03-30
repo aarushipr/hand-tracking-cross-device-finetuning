@@ -1,0 +1,16 @@
+# Copyright 2023, Collabora, Ltd.
+# SPDX-License-Identifier: MIT or BSL-1.0 or Apache-2.0
+
+prefix=@CMAKE_INSTALL_PREFIX@
+bindir=${prefix}/@CMAKE_INSTALL_BINDIR@
+mandir=${prefix}/
+docdir=${prefix}/
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: onnxruntime
+Description: ONNX runtime
+URL: https://github.com/microsoft/onnxruntime
+Version: @VER@
+Libs: -L${libdir} -lonnxruntime
+Cflags: -I${includedir}

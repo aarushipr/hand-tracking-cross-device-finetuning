@@ -1,0 +1,1 @@
+bad_csv.h was bad because it required you to name the columns using templatees and the accessor required you to pass references out 

@@ -1,0 +1,12 @@
+torch==1.11.0
+pandas==1.3.3
+opencv-python
+opencv-transforms
+Pillow
+numpy
+scipy
+matplotlib
+wandb
+ujson
+smallestenclosingcircle
+colour-science
