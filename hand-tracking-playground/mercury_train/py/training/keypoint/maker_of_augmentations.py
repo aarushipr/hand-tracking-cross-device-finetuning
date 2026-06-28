@@ -166,11 +166,7 @@ class AugmentationMaker:
             size=(self.output_size, self.output_size))
 
         with open(f"/3/epics/gk3/indoor/BothImages.txt") as f:
-            self.backgrounds_list = [
-                (f"/3/epics/gk3/indoor/indoorCVPR_09/Images/" +
-                 ele).replace(
-                    "\n",
-                    "") for ele in f.readlines()]
+            self.backgrounds_list = []
 
     def make_heatmap_output(self,
                             input_as_tensor: np.ndarray,

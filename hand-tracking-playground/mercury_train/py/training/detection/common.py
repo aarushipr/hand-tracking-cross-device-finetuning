@@ -50,4 +50,4 @@ def visualize_directreg(img, exists, center_x, center_y, size, name):
 
         draw_square_in_image_px_coord(vis_pred, (cx, cy), sz, colors[i])
 
-    cv2.imshow(f"{name}img", vis_pred)
+    cv2.imwrite(f"{name}img.jpg", vis_pred * 255)

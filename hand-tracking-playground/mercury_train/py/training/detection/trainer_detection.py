@@ -43,10 +43,7 @@ def firstbatchcpu(d):
     return d[0].detach().cpu().numpy()
 
 
-def do_thing(val, loss_fn, optimizer, model, ):
-    # print("hi is", e[2], e[3])
-    # print(val)
-
+def train_batch(val, loss_fn, optimizer, model, ):
     inp = val['image'].to(device)
     print("inp", inp.shape)
 
@@ -78,28 +75,36 @@ def do_thing(val, loss_fn, optimizer, model, ):
     print(f"loss is {loss}")
     wandb.log({"loss": loss})
 
+def validate_epoch(val_dataloader, loss_fn, model):
+    model.eval()
+    total_loss = 0.0
 
+    with torch.no_grad():
+        for batch in val_dataloader:
+            inp = batch['image'].to(device)
+            exists_gt = batch['exists'].to(device)
+            center_x_gt = batch['center_x'].to(device)
+            center_y_gt = batch['center_y'].to(device)
+            size_gt = batch['size'].to(device)
 
-    visualize_directreg(firstbatchcpu(inp),
-                        firstbatchcpu(exists_gt),
-                        firstbatchcpu(center_x_gt),
-                        firstbatchcpu(center_y_gt),
-                        firstbatchcpu(size_gt),
-                        "gt")
-    visualize_directreg(firstbatchcpu(inp),
-                        firstbatchcpu(exists_pred),
-                        firstbatchcpu(center_x_pred),
-                        firstbatchcpu(center_y_pred),
-                        firstbatchcpu(size_pred),
-                        "pred")
-    cv2.waitKey(1)
+            pred = model(inp)
+            exists_pred = pred[0]
+            center_x_pred = pred[1]
+            center_y_pred = pred[2]
+            size_pred = pred[3]
 
-    # evil_viz(inp[0].cpu(), pred[0].cpu(), name+"PRED")
+            loss_exists   = loss_fn(exists_gt, exists_pred)
+            loss_center_x = loss_fn(center_x_gt * exists_gt, center_x_pred * exists_gt)
+            loss_center_y = loss_fn(center_y_gt * exists_gt, center_y_pred * exists_gt)
+            loss_size     = loss_fn(size_gt * exists_gt, size_pred * exists_gt)
 
+            total_loss += (loss_exists + loss_center_x + loss_center_y + loss_size).item()
+
+    model.train()
+    return total_loss / len(val_dataloader)
 
 def main():
-    batch_size = 2
-    batch_size = 1024
+    batch_size = 64
     num_workers = 24
     # model = simdr.PoseHighResolutionNet(model_cfgs.config_moses_feb10)
     model = DetNet.DetNet()
@@ -125,14 +130,14 @@ def main():
     dataset = CombinedDataset()
 
 
-    dataloader = DataLoader(dataset, batch_size=local_config.batch_size,
+    dataloader = DataLoader(dataset, batch_size=batch_size,
                             shuffle=True, num_workers=num_workers)
 
     for epoch in range(start_epoch, 200):
         length = len(dataloader)
         for idx, batch in enumerate(dataloader):
             print(f"{idx*100/length}% way through")
-            do_thing(batch, loss_fn, optimizer, model)
+            train_batch(batch, loss_fn, optimizer, model)
 
         final_output_dir = f"checkpoints"
         save_checkpoint({
