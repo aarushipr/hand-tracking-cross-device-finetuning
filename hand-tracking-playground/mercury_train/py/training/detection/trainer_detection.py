@@ -106,7 +106,7 @@ def validate_epoch(val_dataloader, loss_fn, model):
 def main():
     batch_size = 64
     num_workers = 24
-    # model = simdr.PoseHighResolutionNet(model_cfgs.config_moses_feb10)
+    
     model = DetNet.DetNet()
     model = torch.nn.DataParallel(model).to(device)
 
@@ -129,22 +129,43 @@ def main():
 
     dataset = CombinedDataset()
 
+    val_size = int(0.2 * len(dataset))
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    dataloader = DataLoader(dataset, batch_size=batch_size,
-                            shuffle=True, num_workers=num_workers)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
+    val_dataloader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     for epoch in range(start_epoch, 200):
-        length = len(dataloader)
-        for idx, batch in enumerate(dataloader):
-            print(f"{idx*100/length}% way through")
+        # training
+        model.train()
+        length = len(train_dataloader)
+        for idx, batch in enumerate(train_dataloader):
+            print(f"{idx*100/length}% way through epoch {epoch}")
             train_batch(batch, loss_fn, optimizer, model)
 
+        # validation
+        val_loss = validate_epoch(val_dataloader, loss_fn, model)
+        print(f"Epoch {epoch} validation loss: {val_loss}")
+        wandb.log({"val_loss": val_loss, "epoch": epoch})
+        
+        # save latest checkpoint
         final_output_dir = f"checkpoints"
         save_checkpoint({
             "epoch": epoch,
             "state_dict": model.module.state_dict(),
             "optimizer": optimizer.state_dict(),
         }, final_output_dir)
+        # save best checkpoint when validation loss improves
+        if val_loss < last_validation_loss:
+            last_validation_loss = val_loss
+            print(f"Validation improved — saving best checkpoint")
+            save_checkpoint({
+                "epoch": epoch,
+                "state_dict": model.module.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }, final_output_dir, filename='checkpoint_best.pth')
+            
         if epoch % 10 == 0:
             print(f"Epoch {epoch}, saving extra!")
             os.system(
