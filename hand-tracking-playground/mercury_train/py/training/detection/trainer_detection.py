@@ -129,12 +129,15 @@ def main():
 
     dataset = CombinedDataset()
 
-    val_size = int(0.2 * len(dataset))
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    # data split 70/10/20
+    test_size  = int(0.2 * len(dataset))
+    val_size   = int(0.1 * len(dataset))
+    train_size = len(dataset) - val_size - test_size
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
     val_dataloader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_dataloader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     for epoch in range(start_epoch, 200):
         # training
@@ -171,6 +174,11 @@ def main():
             os.system(
                 f"cp {final_output_dir}/checkpoint.pth {final_output_dir}/checkpoint_{epoch}.pth")
 
+    # test eval after training done
+    print("Training complete. Running final test evaluation...")
+    test_loss = validate_epoch(test_dataloader, loss_fn, model)
+    print(f"Final test loss: {test_loss}")
+    wandb.log({"test_loss": test_loss})
 
 if __name__ == "__main__":
     main()
