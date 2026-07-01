@@ -157,14 +157,18 @@ class ArtificialDataset(torch.utils.data.Dataset):
         out_curls = np.zeros((5), dtype=np.float32)
 
         numstr = pad_int(frame_idx)
-        img_color_path = f"/4/generation_run_jan9/{seqname}/imgs_color/Image{numstr}.jpg"
-        img_alpha_path = f"/4/generation_run_jan9/{seqname}/imgs_alpha/Image{numstr}.jpg"
+        # NOTE: these used to be hardcoded to a stale absolute path
+        # ("/4/generation_run_jan9/...") independent of `superroot` above,
+        # so the CSVs and the images could silently come from two different
+        # dataset locations (and would fail to load entirely for anyone
+        # whose data doesn't live at that exact literal path). Both now
+        # derive from the same `superroot` used for the CSV loading.
+        img_color_path = os.path.join(superroot, seqname, "imgs_color", f"Image{numstr}.jpg")
+        img_alpha_path = os.path.join(superroot, seqname, "imgs_alpha", f"Image{numstr}.jpg")
 
         alpha: bool = os.path.exists(img_alpha_path)
         if not alpha:
             img_alpha_path = ""
-
-        # img_alpha_path = ""  # "/4/generation_run_jan9/seq0/imgs_alpha/Image0000.jpg"
         # print(f"getting sample, instance {instance_num}")
         ad4_stereographic_projection.prepare_sample(
             img_color_path,

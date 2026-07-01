@@ -1,0 +1,20 @@
+{
+  "name": "basalt-headers",
+  "version": "0.1.0",
+  "description": "Header-only library for Basalt V-SLAM components",
+  "homepage": "https://gitlab.com/VladyslavUsenko/basalt-headers",
+  "license": "BSD-3-Clause",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    "cereal",
+    "eigen3",
+    "sophus"
+  ]
+}

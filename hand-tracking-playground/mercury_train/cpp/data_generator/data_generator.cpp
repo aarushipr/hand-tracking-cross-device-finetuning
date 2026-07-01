@@ -475,7 +475,11 @@ parse_manifest(ArtificialDataImplementation &service)
 
 
 
-	const char *file_content = u_file_read_content_from_path(m);
+	// u_file_read_content_from_path gained a required out-size parameter upstream
+	// since this code was written; we don't need the size ourselves since
+	// cJSON_Parse works off the null terminator, so just give it somewhere to write.
+	size_t file_content_size = 0;
+	const char *file_content = u_file_read_content_from_path(m, &file_content_size);
 	cJSON *config_json = cJSON_Parse(file_content);
 
 	printf("%s\n", file_content);

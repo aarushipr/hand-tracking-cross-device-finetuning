@@ -1,0 +1,8 @@
+cmake-build*
+.idea
+CMakeLists.txt.user
+build*
+public
+.cache
+compile_commands.json
+.cmake_build

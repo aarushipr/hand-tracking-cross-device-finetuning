@@ -1,0 +1,286 @@
+// Copyright 2025-2026, NVIDIA CORPORATION.
+// SPDX-License-Identifier: BSL-1.0
+/*!
+ * @file
+ * @brief Tracking objects to IDs.
+ * @author Jakob Bornecrantz <tbornecrantz@nvidia.com>
+ * @ingroup ipc_server
+ */
+
+#include "xrt/xrt_device.h"
+#include "xrt/xrt_tracking.h"
+#include "xrt/xrt_space.h"
+#include "xrt/xrt_hand_tracker.h"
+
+#include "shared/ipc_protocol.h"
+#include "server/ipc_server.h"
+#include "server/ipc_server_objects.h"
+
+#include <assert.h>
+#include <string.h>
+
+
+/*
+ *
+ * Device functions.
+ *
+ */
+
+xrt_result_t
+ipc_server_objects_get_xdev_and_validate(volatile struct ipc_client_state *ics,
+                                         uint32_t id,
+                                         struct xrt_device **out_xdev)
+{
+	if (id >= XRT_SYSTEM_MAX_DEVICES) {
+		IPC_ERROR(ics->server, "Invalid device ID %u (>= XRT_SYSTEM_MAX_DEVICES)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	struct xrt_device *xdev = ics->objects.xdevs[id];
+	if (xdev == NULL) {
+		IPC_ERROR(ics->server, "Device ID %u not found (NULL)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	*out_xdev = xdev;
+
+	return XRT_SUCCESS;
+}
+
+xrt_result_t
+ipc_server_objects_get_xdev_id_or_add(volatile struct ipc_client_state *ics, struct xrt_device *xdev, uint32_t *out_id)
+{
+	assert(out_id != NULL);
+	assert(xdev != NULL);
+
+	// Check if device is already tracked and return its ID.
+	for (uint32_t index = 0; index < XRT_SYSTEM_MAX_DEVICES; index++) {
+		if (ics->objects.xdevs[index] == xdev) {
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	// If not, find a free slot for it, filled below.
+	uint32_t index = 0;
+	for (; index < XRT_SYSTEM_MAX_DEVICES; index++) {
+		// Found a free slot.
+		if (ics->objects.xdevs[index] == NULL) {
+			break;
+		}
+	}
+
+	if (index >= XRT_SYSTEM_MAX_DEVICES) {
+		IPC_ERROR(ics->server, "Failed to find available slot for device: '%s'", xdev->str);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	// Check that we can also get the tracking origin allocated.
+	uint32_t tracking_origin_id = UINT32_MAX;
+	xrt_result_t xret = ipc_server_objects_get_xtrack_id_or_add(ics, xdev->tracking_origin, &tracking_origin_id);
+	IPC_CHK_AND_RET(ics->server, xret, "ipc_server_objects_get_xtrack_id_or_add");
+
+	ics->objects.xdevs[index] = xdev;
+
+	*out_id = index;
+
+	return XRT_SUCCESS;
+}
+
+
+/*
+ *
+ * Tracking origin functions.
+ *
+ */
+
+xrt_result_t
+ipc_server_objects_get_xtrack_and_validate(volatile struct ipc_client_state *ics,
+                                           uint32_t id,
+                                           struct xrt_tracking_origin **out_xtrack)
+{
+	if (id >= XRT_SYSTEM_MAX_DEVICES) {
+		IPC_ERROR(ics->server, "Invalid tracking origin ID %u (>= XRT_SYSTEM_MAX_DEVICES)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	struct xrt_tracking_origin *xtrack = ics->objects.xtracks[id];
+	if (xtrack == NULL) {
+		IPC_ERROR(ics->server, "Tracking origin ID %u not found (NULL)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	*out_xtrack = xtrack;
+
+	return XRT_SUCCESS;
+}
+
+xrt_result_t
+ipc_server_objects_get_xtrack_id_or_add(volatile struct ipc_client_state *ics,
+                                        struct xrt_tracking_origin *xtrack,
+                                        uint32_t *out_id)
+{
+	assert(out_id != NULL);
+
+	// Check if tracking origin is already tracked and return its ID.
+	for (uint32_t index = 0; index < XRT_SYSTEM_MAX_DEVICES; index++) {
+		if (ics->objects.xtracks[index] == xtrack) {
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	// If not, find a free slot for it, filled below.
+	for (uint32_t index = 0; index < XRT_SYSTEM_MAX_DEVICES; index++) {
+		if (ics->objects.xtracks[index] == NULL) {
+			ics->objects.xtracks[index] = xtrack;
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	IPC_ERROR(ics->server, "Failed to find available slot for tracking origin: '%s'", xtrack->name);
+
+	return XRT_ERROR_IPC_FAILURE;
+}
+
+
+/*
+ *
+ * Space functions.
+ *
+ */
+
+xrt_result_t
+ipc_server_objects_get_xspc_and_validate(volatile struct ipc_client_state *ics,
+                                         uint32_t id,
+                                         struct xrt_space **out_xspc)
+{
+	if (id >= IPC_MAX_CLIENT_SPACES) {
+		IPC_ERROR(ics->server, "Invalid space ID %u (>= IPC_MAX_CLIENT_SPACES)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	struct xrt_space *xspc = ics->xspcs[id];
+	if (xspc == NULL) {
+		IPC_ERROR(ics->server, "Space ID %u not found (NULL)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	*out_xspc = xspc;
+
+	return XRT_SUCCESS;
+}
+
+xrt_result_t
+ipc_server_objects_get_xspc_id_or_add(volatile struct ipc_client_state *ics, struct xrt_space *xspc, uint32_t *out_id)
+{
+	assert(out_id != NULL);
+	assert(xspc != NULL);
+
+	// Check if space is already tracked and return its ID.
+	for (uint32_t index = 0; index < IPC_MAX_CLIENT_SPACES; index++) {
+		if (ics->xspcs[index] == xspc) {
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	// If not, find a free slot for it, filled below.
+	for (uint32_t index = 0; index < IPC_MAX_CLIENT_SPACES; index++) {
+		if (ics->xspcs[index] == NULL) {
+			struct xrt_space **xspc_ptr = (struct xrt_space **)&ics->xspcs[index];
+			xrt_space_reference(xspc_ptr, xspc);
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	IPC_ERROR(ics->server, "Failed to find available slot for space");
+	return XRT_ERROR_IPC_FAILURE;
+}
+
+xrt_result_t
+ipc_server_objects_destroy_xspc(volatile struct ipc_client_state *ics, uint32_t id)
+{
+	if (id >= IPC_MAX_CLIENT_SPACES) {
+		IPC_ERROR(ics->server, "Invalid space ID %u (>= IPC_MAX_CLIENT_SPACES)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	if (ics->xspcs[id] == NULL) {
+		IPC_ERROR(ics->server, "Client tried to destroy non-existent space!");
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	struct xrt_space **xspc_ptr = (struct xrt_space **)&ics->xspcs[id];
+	xrt_space_reference(xspc_ptr, NULL);
+
+	return XRT_SUCCESS;
+}
+
+
+/*
+ *
+ * Hand tracker functions.
+ *
+ */
+
+xrt_result_t
+ipc_server_objects_get_xht_and_validate(volatile struct ipc_client_state *ics,
+                                        uint32_t id,
+                                        struct xrt_hand_tracker **out_xht)
+{
+	if (id >= IPC_MAX_CLIENT_HAND_TRACKERS) {
+		IPC_ERROR(ics->server, "Invalid hand tracker ID %u (>= IPC_MAX_CLIENT_HAND_TRACKERS)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	struct xrt_hand_tracker *xht = ics->objects.xhts[id];
+	if (xht == NULL) {
+		IPC_ERROR(ics->server, "Hand tracker ID %u not found (NULL)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	*out_xht = xht;
+
+	return XRT_SUCCESS;
+}
+
+xrt_result_t
+ipc_server_objects_get_xht_id_or_add(volatile struct ipc_client_state *ics,
+                                     struct xrt_hand_tracker *xht,
+                                     uint32_t *out_id)
+{
+	assert(out_id != NULL);
+	assert(xht != NULL);
+
+	for (uint32_t index = 0; index < IPC_MAX_CLIENT_HAND_TRACKERS; index++) {
+		if (ics->objects.xhts[index] == NULL) {
+			ics->objects.xhts[index] = xht;
+			*out_id = index;
+			return XRT_SUCCESS;
+		}
+	}
+
+	IPC_ERROR(ics->server, "Failed to find available slot for hand tracker");
+	return XRT_ERROR_IPC_FAILURE;
+}
+
+xrt_result_t
+ipc_server_objects_destroy_xht(volatile struct ipc_client_state *ics, uint32_t id)
+{
+	if (id >= IPC_MAX_CLIENT_HAND_TRACKERS) {
+		IPC_ERROR(ics->server, "Invalid hand tracker ID %u (>= IPC_MAX_CLIENT_HAND_TRACKERS)", id);
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	if (ics->objects.xhts[id] == NULL) {
+		IPC_ERROR(ics->server, "Client tried to destroy non-existent hand tracker!");
+		return XRT_ERROR_IPC_FAILURE;
+	}
+
+	xrt_hand_tracker_destroy((struct xrt_hand_tracker **)&ics->objects.xhts[id]);
+
+	return XRT_SUCCESS;
+}

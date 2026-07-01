@@ -1,0 +1,139 @@
+variables:
+  GIT_SUBMODULE_STRATEGY: none
+  CI_BASE_IMAGE: "vladyslavusenko/basalt-headers-ci:ubuntu22"
+  BUILD_TYPE: Release
+  CXX_MARCH: 'x86-64-v3'
+  VCPKG_ROOT: "${CI_PROJECT_DIR}/.vcpkg"
+  VCPKG_DEFAULT_TRIPLET: "x64-linux"
+  VCPKG_DOWNLOADS: "${CI_PROJECT_DIR}/.cache/vcpkg/downloads"
+  VCPKG_BINARY_SOURCES: "clear;files,${CI_PROJECT_DIR}/.cache/vcpkg/archives,readwrite"
+  VCPKG_FEATURE_FLAGS: "binarycaching"
+  LLVM_VERSION: "21"
+  CC: "clang-${LLVM_VERSION}"
+  CXX: "clang++-${LLVM_VERSION}"
+
+stages:
+  - build
+  - docs
+
+# template for docker builds with ccache and vcpkg
+.prepare_docker_template: &prepare_docker_definition
+  tags:
+    - docker
+  image: ${CI_BASE_IMAGE}
+  cache:
+    key:
+      prefix: "build-cache-${VCPKG_DEFAULT_TRIPLET}"
+      files:
+        - .gitlab-ci.yml
+        - ports/basalt-headers/vcpkg.json
+    policy: pull-push
+    paths:
+      - ccache/
+      - .cache/vcpkg/
+      - .vcpkg/installed/
+      - .vcpkg/vcpkg
+  before_script:
+    - mkdir -p ccache "${VCPKG_DOWNLOADS}" "${CI_PROJECT_DIR}/.cache/vcpkg/archives"
+    - export CCACHE_BASEDIR=${PWD}
+    - export CCACHE_DIR=${PWD}/ccache
+    - export CCACHE_COMPILERCHECK=content
+    - export CMAKE_VCPKG_ARGS="-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${VCPKG_DEFAULT_TRIPLET}"
+    - |
+      if [ ! -x "${VCPKG_ROOT}/vcpkg" ] || [ ! -f "${VCPKG_ROOT}/triplets/${VCPKG_DEFAULT_TRIPLET}.cmake" ] || [ ! -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+        rm -rf "${VCPKG_ROOT}"
+        git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"
+        "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+      fi
+    - "${VCPKG_ROOT}/vcpkg install eigen3 sophus cereal gtest benchmark --triplet ${VCPKG_DEFAULT_TRIPLET}"
+    - ccache -s
+
+.ubuntu_clang_template: &ubuntu_clang_definition
+  <<: *prepare_docker_definition
+
+.llvm_clang_template: &llvm_clang_definition
+  <<: *prepare_docker_definition
+
+# template for secondary build & unit test configurations
+.compile_and_test_template: &compile_and_test_definition
+  <<: *ubuntu_clang_definition
+  stage: build
+  script:
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DCXX_MARCH=${CXX_MARCH} ${CMAKE_VCPKG_ARGS}
+    - cmake --version
+    - cmake --build build -j4
+    - ctest --test-dir build --output-on-failure
+
+# main release build with benchmark
+release-compile:
+  <<: *ubuntu_clang_definition
+  stage: build
+  script:
+    - !reference [.compile_and_test_template, script]
+    - ./build/test/benchmark_camera > benchmark_camera.txt
+  artifacts:
+    paths:
+      - benchmark_camera.txt
+
+coverage-clang:
+  <<: *llvm_clang_definition
+  stage: build
+  script:
+    - cmake -S . -B build_coverage -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DCXX_MARCH=${CXX_MARCH} -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping -O0 -g" -DCMAKE_EXE_LINKER_FLAGS="-fprofile-instr-generate" ${CMAKE_VCPKG_ARGS}
+    - cmake --build build_coverage -j4
+    - mkdir -p build_coverage/profiles
+    - export LLVM_PROFILE_FILE="${CI_PROJECT_DIR}/build_coverage/profiles/%p-%m.profraw"
+    - ctest --test-dir build_coverage --output-on-failure
+    - llvm-profdata-${LLVM_VERSION} merge build_coverage/profiles/*.profraw -o build_coverage/coverage.profdata
+    - find build_coverage/test -type f -executable > build_coverage/coverage_bins.txt
+    - test -s build_coverage/coverage_bins.txt
+    - python3 scripts/coverage_all_headers.py --bins-file build_coverage/coverage_bins.txt --profdata build_coverage/coverage.profdata --headers-root include/basalt --output build_coverage/coverage_summary.md --llvm-cov llvm-cov-${LLVM_VERSION}
+    - cat build_coverage/coverage_summary.md
+    - llvm-cov-${LLVM_VERSION} report $(sed 's/^/-object /' build_coverage/coverage_bins.txt) -instr-profile=build_coverage/coverage.profdata --sources include/basalt
+
+debug-compile:
+  <<: *compile_and_test_definition
+  variables:
+    BUILD_TYPE: Debug
+
+relwithdebinfo-compile:
+  <<: *compile_and_test_definition
+  variables:
+    BUILD_TYPE: RelWithDebInfo
+
+asan-build:
+  <<: *llvm_clang_definition
+  stage: build
+  variables:
+    BUILD_TYPE: SanitizerRelWithDebInfo
+    # LeakSanitizer doesn't work in (non-priviliged) container
+    ASAN_OPTIONS: "detect_leaks=0"
+  script:
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DCXX_MARCH=${CXX_MARCH} ${CMAKE_VCPKG_ARGS}
+    - cmake --build build -j4
+    - ctest --test-dir build --output-on-failure
+
+# check if clang-format would make any changes
+clang-format:
+  tags:
+    - docker
+  stage: build
+  image: ${CI_BASE_IMAGE}
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - pre-commit run --all-files
+
+
+pages:
+  stage: docs
+  image: ${CI_BASE_IMAGE}
+  tags:
+    - docker
+  script:
+    - doxygen
+  artifacts:
+    paths:
+      - public
+  only:
+    - master

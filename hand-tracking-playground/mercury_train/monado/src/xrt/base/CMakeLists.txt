@@ -1,0 +1,30 @@
+# Copyright 2026, NVIDIA CORPORATION.
+# SPDX-License-Identifier: BSL-1.0
+
+add_library(base STATIC)
+target_include_directories(base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_link_libraries(
+	base
+	PRIVATE aux_util aux_os
+	PUBLIC xrt-interfaces
+	)
+
+target_sources(
+	base
+	PRIVATE
+		b_documentation.h
+		b_hand_tracker.cpp
+		b_hand_tracker.h
+		b_hand_tracker.hpp
+		b_session.c
+		b_session.h
+		b_space_overseer.c
+		b_space_overseer.h
+		b_system.c
+		b_system.h
+		b_system_devices.c
+		b_system_devices.h
+		b_timing_source.c
+		b_timing_source.h
+	)

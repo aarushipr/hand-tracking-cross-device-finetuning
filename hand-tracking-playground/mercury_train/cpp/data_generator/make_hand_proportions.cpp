@@ -205,7 +205,7 @@ const char *black_male_3dscanstore_proportions = R"_({
 
 
 void
-make_hand_limit(const cJSON *hi, lm::HandLimit out_hand_limit)
+make_hand_limit(const cJSON *hi, lm::HandLimit &out_hand_limit)
 {
 	// This is intentionally incomplete. Time pressure
 	lm::HandLimit lim = {};
@@ -221,8 +221,8 @@ make_hand_limit(const cJSON *hi, lm::HandLimit out_hand_limit)
 			lim.thumb_mcp_swing_x.min = min->valuedouble;
 			lim.thumb_mcp_swing_x.max = max->valuedouble;
 		} else {
-			lim.fingers->mcp_swing_x.min = min->valuedouble;
-			lim.fingers->mcp_swing_x.max = max->valuedouble;
+			lim.fingers[f - 1].mcp_swing_x.min = min->valuedouble;
+			lim.fingers[f - 1].mcp_swing_x.max = max->valuedouble;
 		}
 	}
 
@@ -237,8 +237,8 @@ make_hand_limit(const cJSON *hi, lm::HandLimit out_hand_limit)
 			lim.thumb_mcp_swing_y.min = min->valuedouble;
 			lim.thumb_mcp_swing_y.max = max->valuedouble;
 		} else {
-			lim.fingers->mcp_swing_y.min = min->valuedouble;
-			lim.fingers->mcp_swing_y.max = max->valuedouble;
+			lim.fingers[f - 1].mcp_swing_y.min = min->valuedouble;
+			lim.fingers[f - 1].mcp_swing_y.max = max->valuedouble;
 		}
 	}
 
@@ -254,10 +254,17 @@ make_hand_limit(const cJSON *hi, lm::HandLimit out_hand_limit)
 			lim.thumb_mcp_twist.min = min->valuedouble;
 			lim.thumb_mcp_twist.max = max->valuedouble;
 		} else {
-			lim.fingers->mcp_twist.min = min->valuedouble;
-			lim.fingers->mcp_twist.max = max->valuedouble;
+			lim.fingers[f - 1].mcp_twist.min = min->valuedouble;
+			lim.fingers[f - 1].mcp_twist.max = max->valuedouble;
 		}
 	}
+
+	// NOTE: previously this function computed `lim` and then discarded it —
+	// `out_hand_limit` was never written, and was passed by value on top of
+	// that, so per-model joint limits parsed from the Blender rig were
+	// silently ignored and the solver always used HandLimit's hardcoded
+	// defaults. Both are fixed now (reference param + this assignment).
+	out_hand_limit = lim;
 }
 
 void
