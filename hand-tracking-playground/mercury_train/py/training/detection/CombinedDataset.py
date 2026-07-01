@@ -31,6 +31,8 @@ class CombinedDataset(torch.utils.data.Dataset):
 
         hmdhandrect_datasets = []
 
+        # subject02 sequences are held out as the validation set.
+        # They must never appear here — adding them would contaminate evaluation.
         hmdhandrect_datasets.append(HMDHandRectsDataset(
             f"{local_config.hmdhandrects_location}/sequences/train_subject00_sequence00"))
 
@@ -49,18 +51,16 @@ class CombinedDataset(torch.utils.data.Dataset):
         hmdhandrect_datasets.append(HMDHandRectsDataset(
             f"{local_config.hmdhandrects_location}/sequences/train_subject01_sequence01"))
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence00"))
+        # HMDHandRects: egocentric XR — the most device-relevant data, weight up.
+        b(torch.utils.data.ConcatDataset(hmdhandrect_datasets), 3)
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence01"))
-
-        b(torch.utils.data.ConcatDataset(hmdhandrect_datasets), 2)
-
+        # EgoHands: egocentric but not XR hardware — still useful, moderate weight.
         b(DarknetDataset(
-            local_config.egohands_convert), .5)
+            local_config.egohands_convert), 1)
 
-        b(EpicKitchensDataset(), 5)
+        # EpicKitchens: GoPro chest-mounted — wrong device type for XR generalisation.
+        # Kept for diversity but weight reduced so it doesn't dominate training.
+        b(EpicKitchensDataset(), 2)
 
         repeat_datasets = []
 

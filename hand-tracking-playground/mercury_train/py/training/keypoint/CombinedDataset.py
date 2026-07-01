@@ -21,24 +21,14 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
+        # freihand and tom are held out for validation and testing respectively.
+        # They must never appear here — adding them would contaminate evaluation.
         if not header.env_settings.loadfast:
             b(RandoDataset(f"{datasets_basepath}/", "nikitha.csv"), 0.6)
-            b(RandoDataset(f"{datasets_basepath}/", "frei_gs.csv"), 0.5)
-            b(RandoDataset(f"{datasets_basepath}/", "tom.csv"), 0.8)
+            b(RandoDataset(f"{datasets_basepath}/", "panoptic_manual.csv"), 0.8)
+            b(RandoDataset(f"{datasets_basepath}/", "panoptic_synth.csv"), 0.8)
 
-            b(RandoDataset(f"{datasets_basepath}/",
-                           "panoptic_manual.csv"), 0.8)
-            b(RandoDataset(f"{datasets_basepath}/",
-                           "panoptic_synth.csv"), 0.8)
-
-        # 0.6+0.5+0.8+0.8+0.8
-        # 3.5
-
-        # b(nonechucks.SafeDataset(ArtificialDataset()), 4.0)
         b(ArtificialDataset(), 2.0)
-
-        # b(RandoDataset(f"{datasets_basepath}/",
-        #   "panoptic_panoptic.csv"), 0.8)
 
         biggest_dataset_len = 0
         biggest_dataset_associated_amt = 0

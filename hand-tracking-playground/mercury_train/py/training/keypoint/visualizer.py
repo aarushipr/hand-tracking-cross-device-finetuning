@@ -177,21 +177,16 @@ def display_and_log_output(
 
     input_image_with_maybe_predicted = input_image.copy()
 
-    print(predicted_keypoints)
-
     if predicted_keypoints is not None:
         predicted_keypoints_img = np.zeros((21, 2))
         for idx, kp in enumerate(predicted_keypoints):
             predicted_keypoints_img[idx] = geo.map_ranges(
                 kp[:2], -1, 1, 0, 128)
-            # predicted_keypoints_img[idx] = kp[:2]
 
             cv2.circle(
                 input_image_with_maybe_predicted, (int(
                     predicted_keypoints_img[idx][0]), int(
                     predicted_keypoints_img[idx][1])), 2, (255, 0, 255))
-        np.set_printoptions(suppress=True)
-        print("img", predicted_keypoints_img)
         geo.draw_21_hand_lines(
             input_image_with_maybe_predicted, predicted_keypoints_img, (255, 0, 255))
 

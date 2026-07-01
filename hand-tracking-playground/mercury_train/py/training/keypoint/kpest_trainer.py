@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 
 if __name__ == "__main__":
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../'))
@@ -7,47 +8,19 @@ if __name__ == "__main__":
 import local_config
 
 import CombinedDataset
-from ArtificialData import ArtificialDataset
 from RandoData import RandoDataset
-import traceback
-from dataclasses import dataclass
-
-import logging
-from typing import Any
-
-
-import random
-import math
-import csv
-import pandas as pd
 import numpy as np
-
-import subprocess
-import json
-import cv2
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import KeyNet
-
-import maker_of_augmentations
-import a_aug_config
-import py.training.common.a_geometry as geo
 import settings
 import kpest_header as header
 import wandb
 import visualizer
 import validatoor
 import multiprocessing
-
-# This namedWindow call is magic, and required to make cv2.imshow() not crash on Arch. Feel free to comment it out but please don't remove
-# cv2.namedWindow('a', 0)
-
-
-# This is useful if your loss suddenly goes to inf/nan, it's just `feenableexcept` but for PyTorch/CUDA
-# Quite slow, keep it off if you don't need it.
-# torch.autograd.set_detect_anomaly(True)
 
 
 # https://gitanswer.com/pytorch-too-many-open-files-error-cplusplus-356516297
@@ -76,9 +49,7 @@ def train_loop(device, dataloader, model, optimizer):
             .to(device)
 
         # Elements of this vector are set to 1 if the image contains a hand, 0 if it doesn't.
-        #
         gt_is_hand = doct['is_hand'].to(device)
-        is_hand_expanded_for_scalars = gt_is_hand[:, None]
 
         gt_depth = doct['gt_depth'].to(device)
         has_depth = doct['has_depth'].to(device)
@@ -102,50 +73,35 @@ def train_loop(device, dataloader, model, optimizer):
         gt_elbow = doct["elbow"].to(device)
 
         gt_curls = doct["curls"].to(device)
-        print(gt_curls.shape)
 
-        if (not settings.using_pose_predicted_input):
-            input_predicted_keypoints_valid = torch.zeros(
-                input_predicted_keypoints_valid.shape)
-            input_predicted_keypoints = torch.zeros(
-                (input_predicted_keypoints.shape))
-            print(input_predicted_keypoints.shape)
-            # input_predicted_keypoints_real = torch.zeros((1, 63))
+        if not settings.using_pose_predicted_input:
+            input_predicted_keypoints_valid = torch.zeros(input_predicted_keypoints_valid.shape)
+            input_predicted_keypoints = torch.zeros(input_predicted_keypoints.shape)
 
         model_pred_xy, model_pred_depth, model_extras, model_pred_curls_gnll = model(
-            input_image, torch.flatten(
-                input_predicted_keypoints, start_dim=1), input_predicted_keypoints_valid)
+            input_image, torch.flatten(input_predicted_keypoints, start_dim=1), input_predicted_keypoints_valid)
 
+        # Unpack extras: index 0 is hand existence (passed through sigmoid to get a probability),
+        # indices 1-3 are the elbow direction vector.
         model_pred_is_hand = torch.special.expit(model_extras[:, 0])
-
         model_pred_elbow = model_extras[:, 1:4]
 
+        # Unpack curls: first 5 are the curl angles, last 5 are the predicted variances.
         model_pred_curls = model_pred_curls_gnll[:, 0:5]
         model_pred_curl_variances = model_pred_curls_gnll[:, 5:10]
 
-        # We keep the minimum variance well above zero, because of how crazy GNLL is with low variances
-        # and because it's not... really, possible? for ML to estimate variance
-        # super accurately
-        model_pred_curl_variances = model_pred_curl_variances.abs() + \
-            settings.curl_min_variance
+        # Variance must be positive and never too close to zero — GNLL is numerically
+        # unstable at very low variances, and a network can't reliably estimate uncertainty
+        # to that precision anyway.
+        model_pred_curl_variances = model_pred_curl_variances.abs() + settings.curl_min_variance
 
-        loss_xy = mse(model_pred_xy * has_xy_expanded,
-                      gt_xy * has_xy_expanded)
-
-        loss_depth = mse(model_pred_depth * has_depth_expanded,
-                         gt_depth * has_depth_expanded) * 0.03  # ??
-
-        loss_existence = mse(model_pred_is_hand, gt_is_hand) * \
-            settings.existence_loss_mul
-
-        loss_elbow = mse(model_pred_elbow * has_elbow_curls,
-                         gt_elbow * has_elbow_curls) * settings.elbow_loss_mul
-
-        loss_curls = (
-            gnll(
-                model_pred_curls,
-                gt_curls,
-                model_pred_curl_variances) * has_elbow_curls).mean() * settings.curls_loss_mul
+        # Each loss is masked by its availability flag so that samples without
+        # labels for that output contribute zero gradient.
+        loss_xy = mse(model_pred_xy * has_xy_expanded, gt_xy * has_xy_expanded)
+        loss_depth = mse(model_pred_depth * has_depth_expanded, gt_depth * has_depth_expanded) * settings.depth_loss_mul
+        loss_existence = mse(model_pred_is_hand, gt_is_hand) * settings.existence_loss_mul
+        loss_elbow = mse(model_pred_elbow * has_elbow_curls, gt_elbow * has_elbow_curls) * settings.elbow_loss_mul
+        loss_curls = (gnll(model_pred_curls, gt_curls, model_pred_curl_variances) * has_elbow_curls).mean() * settings.curls_loss_mul
 
         loss = loss_xy + loss_depth + loss_existence + loss_elbow + loss_curls
 
@@ -155,11 +111,13 @@ def train_loop(device, dataloader, model, optimizer):
         optimizer.step()
         optimizer.zero_grad()
 
-        wandb.log({f"loss_xy": float(loss_xy),
-                  "loss_depth": float(loss_depth),
-                   "loss_existence": float(loss_existence),
-                   "loss_elbow": float(loss_elbow),
-                   "loss_curls": float(loss_curls)})
+        wandb.log({
+            "loss_xy": float(loss_xy),
+            "loss_depth": float(loss_depth),
+            "loss_existence": float(loss_existence),
+            "loss_elbow": float(loss_elbow),
+            "loss_curls": float(loss_curls),
+        })
         freq = 300
         if (header.env_settings.loadfast):
             freq = 1
@@ -202,97 +160,70 @@ def train_loop(device, dataloader, model, optimizer):
     return avg_loss
 
 
-@dataclass
-class val_dataset_and_name:
-    dataset: torch.utils.data.Dataset
-    name: str
-    use_prediction_too: bool = False
-    dataloader: torch.utils.data.DataLoader = None
-
-
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     num_devices = 1
-    batch_size_per_device = 64
-    batch_size_per_device = 256
-    if (device == "cuda:0"):
+    batch_size_per_device = 256  # Warning: high values can OOM RAM, be careful
+    if device.type == "cuda":
         num_devices = torch.cuda.device_count()
         print(f"Let's use {num_devices} GPUs!")
-        # Warning, this can OOM your RAM if too high. At least right now. Be
-        # careful :)
-    wandb_name = "free_scans_2d_input_jan17"
+
+    wandb_name = "keypoint_estimator_training"
     if header.env_settings.wandb_enabled:
         wandb.init(project=wandb_name, entity="col")
     else:
         wandb.init(project=wandb_name, entity="col", mode="disabled")
-    # hd_train = ArtificialData.ArtificialDataset(
-    #     maker_of_augmentations.AugmentationMaker(a_aug_config.the_aug_config))
-    # d = torch.utils.data.ConcatDataset([a, b])
 
-    hd_train = CombinedDataset.AllOfTheDatasetsCombined()
+    # On SLURM, cpu_count() returns all CPUs on the node, not just the ones
+    # allocated to this job. SLURM_CPUS_PER_TASK is the correct value to use.
+    num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", multiprocessing.cpu_count()))
 
-    # pls work aaaaaaaaa
+    batch_size = batch_size_per_device * num_devices
+
+    # Training: synthetic + panoptic + nikitha. freihand and tom are excluded
+    # from CombinedDataset — they are held out for evaluation only.
     dataloader_train = DataLoader(
-        hd_train,
-        batch_size=batch_size_per_device *
-        num_devices,
+        CombinedDataset.AllOfTheDatasetsCombined(),
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=multiprocessing.cpu_count(),
+        num_workers=num_workers,
         timeout=100,
         persistent_workers=True,
         drop_last=True)
-    #   worker_init_fn=ArtificialData.init_fn)
 
-    val_datasets = []
+    # Validation (run every epoch): FreiHand — a different capture setup from
+    # training data, tests whether the model generalises to a new real dataset.
+    dataloader_val = DataLoader(
+        RandoDataset(local_config.real_datasets_basepath, "frei_gs.csv"),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers)
 
-    if True:
-        # val_datasets.append(val_dataset_and_name(ArtificialDataset(
-        #     "/media/moses/raid/inshallah8_validation/", a_aug_config.aug_config_validatoor_not_hand, validation_dataset=True), "not_hand", True))
-        # val_datasets.append(val_dataset_and_name(ArtificialDataset(
-        #     "/media/moses/raid/inshallah8_validation/", a_aug_config.aug_config_validatoor, validation_dataset=True), "artificial", True))
-
-        val_datasets.append(
-            val_dataset_and_name(
-                RandoDataset(
-                    local_config.real_datasets_basepath,
-                    "panoptic_manual.csv"),
-                "panoptic_manual"))
-        # Disabling panoptic_panoptic because it's big and inaccurate
-        # val_datasets.append(val_dataset_and_name(RandoDataset(
-        # "panoptic_panoptic"))
-        val_datasets.append(val_dataset_and_name(RandoDataset(
-            local_config.real_datasets_basepath, "frei_gs.csv"), "freihand"))
-        val_datasets.append(val_dataset_and_name(RandoDataset(
-            local_config.real_datasets_basepath, "tom.csv"), "tom_openhands"))
-
-    for vn in val_datasets:
-        vn.dataloader = DataLoader(
-            vn.dataset,
-            batch_size=batch_size_per_device * num_devices,
-            shuffle=False,
-            num_workers=24
-        )
+    # Test (run once after training): Tom OpenHands — held out entirely.
+    # Replace with HOT3D / UmeTrack once those datasets are obtained, as they
+    # represent true cross-device generalisation to different XR hardware.
+    dataloader_test = DataLoader(
+        RandoDataset(local_config.real_datasets_basepath, "tom.csv"),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers)
 
     model = KeyNet.KeyNet()
-
     model = torch.nn.DataParallel(model).to(device)
-
     optimizer = torch.optim.AdamW(model.module.parameters())
 
-    checkpoint_file = os.path.join(
-        f"checkpoints", 'checkpoint.pth'
-    )
+    # Use an absolute path so checkpoints are always written to the same place
+    # regardless of what directory SLURM starts the job from.
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
+    checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     start_epoch = 0
-    last_validation_loss = 10000000000
+    best_validation_loss = float('inf')
 
     if os.path.exists(checkpoint_file):
-        checkpoint = torch.load(
-            checkpoint_file, map_location=torch.device(device))
-
-        # Can delete this later btw
-        if 'validation_loss' in checkpoint.keys():
-            last_validation_loss = checkpoint['validation_loss']
+        checkpoint = torch.load(checkpoint_file, map_location=torch.device(device))
+        if 'best_validation_loss' in checkpoint:
+            best_validation_loss = checkpoint['best_validation_loss']
         start_epoch = checkpoint['epoch']
         model.module.load_state_dict(checkpoint['state_dict'])
         try:
@@ -303,58 +234,56 @@ def main():
     for epoch in range(start_epoch, 2000000000000):
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
-        avg_loss_train = train_loop(device, dataloader_train,
-                                    model, optimizer)
+        model.train()
+        train_loop(device, dataloader_train, model, optimizer)
 
         model.eval()
-        for vn in val_datasets:
-            a = validatoor.validation_loop(
-                device,
-                vn.dataloader,
-                model,
-                mse,
-                vn.name,
-                vn.use_prediction_too,
-                epoch)
-            validation_loss = a.mean_loss_no_pred + a.mean_loss_pred
+        val_result = validatoor.validation_loop(
+            device, dataloader_val, model, mse, "val", False, epoch)
+        mean_validation_loss = val_result.mean_loss_no_pred
         model.train()
 
-        # We don't want to save models trained on 0.1% of our dataset.
-        if (header.env_settings.loadfast):
+        # Skip saving checkpoints when in fast/debug mode — model is only
+        # trained on a tiny slice of data and isn't worth keeping.
+        if header.env_settings.loadfast:
             continue
-        # losses: validatoor.validation_losses = validatoor.validation_losses(0, 0)
-        # model.eval()
-        # for vn in val_datasets:
-        #     a = validatoor.validation_loop(
-        #         device, vn.dataloader, model, loss_fn, vn.name, vn.use_prediction_too, epoch)
-        #     validation_loss = a.mean_loss_no_pred + a.mean_loss_pred
-        # model.train()
-        final_output_dir = f"checkpoints"
-        # best_model = validation_loss < last_validation_loss
-        # if avg_loss_train < validation_loss:
-        #     best_model = True
 
-        print(f'Done with epoch {epoch}')
+        is_best = mean_validation_loss < best_validation_loss
+        if is_best:
+            best_validation_loss = mean_validation_loss
+
+        print(f'Done with epoch {epoch} — val loss: {mean_validation_loss:.4f} (best: {best_validation_loss:.4f})')
+        wandb.log({"val_loss": mean_validation_loss, "best_val_loss": best_validation_loss})
 
         save_checkpoint({
             'epoch': epoch,
             'state_dict': model.module.state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, final_output_dir)
+            'best_validation_loss': best_validation_loss,
+        }, checkpoint_dir)
 
         if epoch % 10 == 0:
-            print(f"Epoch {epoch}, saving extra!")
-            os.system(
-                f"cp {final_output_dir}/checkpoint.pth {final_output_dir}/checkpoint_{epoch}.pth")
-        # if best_model:
-        #     print(
-        #         f"Best! Saving as such! (last best was {last_validation_loss} new best is {validation_loss}")
-        #     validation_loss = avg_loss_train
-        #     os.system(
-        # f"cp {final_output_dir}/checkpoint.pth
-        # {final_output_dir}/checkpoint_best.pth")
-        else:
-            print(f"Not best performance!")
+            print(f"Epoch {epoch}, saving extra checkpoint!")
+            shutil.copy(
+                os.path.join(checkpoint_dir, "checkpoint.pth"),
+                os.path.join(checkpoint_dir, f"checkpoint_{epoch}.pth"))
+
+        if is_best:
+            print(f"Best model so far! Saving as checkpoint_best.pth")
+            shutil.copy(
+                os.path.join(checkpoint_dir, "checkpoint.pth"),
+                os.path.join(checkpoint_dir, "checkpoint_best.pth"))
+
+    # Run the test set once after training is complete.
+    # The test set is never seen during training or used for checkpoint selection,
+    # so this gives an unbiased measure of final model performance.
+    print("Training complete. Running final test evaluation...")
+    model.eval()
+    test_result = validatoor.validation_loop(
+        device, dataloader_test, model, mse, "test", False, epoch)
+    test_loss = test_result.mean_loss_no_pred
+    print(f"Final test loss: {test_loss:.4f}")
+    wandb.log({"test_loss": test_loss})
 
 
 if __name__ == "__main__":
