@@ -117,17 +117,33 @@ def main():
 
     # Validation (run every epoch): subject02 sequences — same device as
     # training data but a different subject not seen during training.
-    val_dataset = torch.utils.data.ConcatDataset([
-        HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence00"),
-        HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence01"),
-    ])
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers)
+    # HMDHandRects has no public source (internal capture) — this is
+    # unconfigured on a fresh checkout/cluster until it's located, so this
+    # is checked and skipped gracefully rather than crashing, same pattern
+    # as CombinedDataset.py's training sources.
+    val_seq_roots = [
+        f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence00",
+        f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence01",
+    ]
+    val_seq_roots = [
+        r for r in val_seq_roots
+        if os.path.exists(os.path.join(r, HMDHandRectsDataset.ann))
+    ]
+
+    val_dataloader = None
+    if val_seq_roots:
+        val_dataset = torch.utils.data.ConcatDataset(
+            [HMDHandRectsDataset(r) for r in val_seq_roots])
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers)
+    else:
+        print("[trainer_detection] Skipping validation — HMDHandRects subject02 "
+              "not found at local_config.hmdhandrects_location. Training will "
+              "still run and checkpoint, but with no validation-loss tracking "
+              "or 'best model' selection until this is located.")
 
     # Test (run once after training): no held-out test dataset yet.
     # Replace with HOT3D once obtained — that represents true cross-device
@@ -165,13 +181,17 @@ def main():
             print(f"Training {idx}/{length}")
             train_batch(device, batch, loss_fn, optimizer, model)
 
-        val_loss = validate_epoch(device, val_dataloader, loss_fn, model)
-        print(f"Epoch {epoch} — val loss: {val_loss:.4f} (best: {best_validation_loss:.4f})")
-        wandb.log({"val_loss": val_loss, "best_val_loss": best_validation_loss})
+        is_best = False
+        if val_dataloader is not None:
+            val_loss = validate_epoch(device, val_dataloader, loss_fn, model)
+            print(f"Epoch {epoch} — val loss: {val_loss:.4f} (best: {best_validation_loss:.4f})")
+            wandb.log({"val_loss": val_loss, "best_val_loss": best_validation_loss})
 
-        is_best = val_loss < best_validation_loss
-        if is_best:
-            best_validation_loss = val_loss
+            is_best = val_loss < best_validation_loss
+            if is_best:
+                best_validation_loss = val_loss
+        else:
+            print(f"Epoch {epoch} — no validation set available, skipping val loss / best-model tracking.")
 
         save_checkpoint({
             "epoch": epoch,
