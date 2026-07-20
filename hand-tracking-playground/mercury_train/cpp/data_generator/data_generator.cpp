@@ -246,7 +246,16 @@ start_blender(ArtificialDataImplementation &impl, int slot_idx)
 {
 	blender_instance_slot &slot = impl.blender_instances[slot_idx];
 
-	std::vector<std::string> args = {"blender", "-P",
+	// -b/--background: without it, Blender tries to open a real GUI window
+	// and create an on-screen GL/EGL surface for it. In a headless session
+	// with no working display, that surface never materializes and Blender
+	// segfaults after spamming "EGL_BAD_MATCH: ... buffers not supplied by
+	// a valid surface" -- confirmed live (2026-07-11). -b skips all of that
+	// and uses Blender's offscreen EGL context instead, which is what
+	// bpy.ops.render.render() in blender_main.py actually needs and is the
+	// standard way to drive Blender headlessly regardless of what display
+	// state happens to be available in a given session.
+	std::vector<std::string> args = {"blender", "-b", "-P",
 	                                 MERCURY_TRAIN_ROOT_DIR "/py/data_generator/blender_main.py"};
 
 	std::string file = impl.blender_files[slot.current_model_idx].string();

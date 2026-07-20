@@ -1,9 +1,11 @@
 add_subdirectory(aux)
 add_subdirectory(data_generator)
 add_subdirectory(dataloader)
-add_subdirectory(pose_recorders)
-add_subdirectory(dataset_playback)
-add_subdirectory(dataset_annotator)
+# pose_recorders requires StereoKit, not available/needed for training
+# add_subdirectory(pose_recorders)
+# dataset_playback and dataset_annotator require deps not needed for training
+# add_subdirectory(dataset_playback)
+# add_subdirectory(dataset_annotator)
 
 add_library(htdev_includes INTERFACE)
 target_include_directories(

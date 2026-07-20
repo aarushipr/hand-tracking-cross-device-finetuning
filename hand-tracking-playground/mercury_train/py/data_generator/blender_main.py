@@ -2,6 +2,11 @@ from dataclasses import dataclass
 import sys  # nopep8
 import os  # nopep8
 sys.path.insert(0, os.path.dirname(__file__))  # nopep8
+import site  # nopep8
+# Belt-and-suspenders copy of the fix in readcsv_fingerpose.py (imported
+# just below, and pulls in pandas) -- this is the actual process entry
+# point, so doing it here too means it doesn't depend on import order.
+sys.path.append(site.getusersitepackages())  # nopep8
 
 import traceback
 
@@ -105,27 +110,52 @@ def add_lights(st: State):
 
 
 def render_settings():
+    # Prototype priority right now is robustness, not visual fidelity --
+    # the real training data will come from elsewhere later; this
+    # pipeline just needs to run end-to-end without crashing. Switching
+    # from EEVEE (whatever each .blend file has saved) to Cycles/CPU:
+    # EEVEE is a GPU rasterizer and depends on a healthy GL/EGL context
+    # for both the world/background pass and rendering generally --
+    # under WSL software rendering that produced repeated EGL_BAD_MATCH
+    # crashes, and even when it didn't crash, a silently black/flat
+    # background regardless of what the world shader was set to. Cycles
+    # path-traces lighting directly and its CPU device doesn't have that
+    # same GL-context dependency for the actual render computation.
+    # Sample count kept low -- this only needs to produce *something*
+    # usable, grain is fine.
+    bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.cycles.device = 'CPU'
+    bpy.context.scene.cycles.samples = 16
+
     # bpy.context.scene.eevee.taa_render_samples = 16
     bpy.context.scene.eevee.taa_render_samples = 1
 
     bpy.context.scene.cycles.adaptive_threshold = 0.1
 
     # Bloom adds seams between cubemap directions. It's bad.
-    bpy.context.scene.eevee.use_bloom = False
+    # (EEVEE Next removed use_bloom entirely -- confirmed live against
+    # Blender 5.1/5.2, no bl_rna property by that name anymore. Nothing to
+    # disable: the bloom effect that caused the seams doesn't exist in
+    # this form anymore either.)
 
     # 1% chance of no motion blur
     if (random.random() > 0.01):
-        bpy.context.scene.eevee.use_motion_blur = True
+        # use_motion_blur / motion_blur_shutter moved from scene.eevee to
+        # scene.render as of EEVEE Next (now shared across render
+        # engines rather than EEVEE-specific) -- confirmed live.
+        # motion_blur_steps stayed on scene.eevee (it's a quality/sample
+        # -count knob, not part of the on/off + shutter-angle move).
+        bpy.context.scene.render.use_motion_blur = True
 
         # bias towards lower blur using square
-        bpy.context.scene.eevee.motion_blur_shutter = random.uniform(
+        bpy.context.scene.render.motion_blur_shutter = random.uniform(
             0.0, 1.0)**2.3
 
-        # bpy.context.scene.eevee.motion_blur_shutter = 1.0
+        # bpy.context.scene.render.motion_blur_shutter = 1.0
 
         print(
             "ADDING MOTION BLUR:",
-            bpy.context.scene.eevee.motion_blur_shutter)
+            bpy.context.scene.render.motion_blur_shutter)
 
         bpy.context.scene.eevee.motion_blur_steps = 5
     else:
@@ -726,7 +756,22 @@ def one_run(st: State):
                      index=False)  # , columns=columns);
 
     if not st.json_response["dont_render"]:
-        bpy.ops.render.render(animation=True, write_still=True)
+        # Render + save frame-by-frame instead of
+        # bpy.ops.render.render(animation=True, write_still=True) followed
+        # by a post-hoc folder conversion: mlib.make_render_output() no
+        # longer uses file-based compositor output at all (see its
+        # comment -- short version: this Blender build forces multilayer
+        # EXR for any CompositorNodeOutputFile fed by Render Layers, and
+        # files written that way can't be read back afterward, which was
+        # silently corrupting both imgs_color and imgs_alpha). All poses
+        # were already keyframed per-frame above, so rendering
+        # frame_current one at a time here is equivalent to rendering the
+        # whole animation in one call.
+        for i in range(st.num_frames):
+            st.blender_scene.frame_current = i
+            mlib.render_and_save_frame(
+                st, i, st.json_response["render_alpha"])
+
         return False
     else:
         return True
@@ -756,8 +801,15 @@ def clean_up_one_run(st: State):
     #     if image.users == 0:
     #         print(f"Found orphan image {image.name}!")
     #         bpy.data.images.remove(image)
-    mlib.remove_orphans_of_datatype(bpy.data.images)
-    mlib.remove_orphans_of_datatype(bpy.data.objects)
+    # Blender's own recursive purge instead of mlib.remove_orphans_of_datatype():
+    # it sweeps images/objects/materials/node-groups/etc. in one call and
+    # repeats until nothing new is orphaned, so something that only becomes
+    # an orphan as a side effect of this same cleanup (e.g. a node group left
+    # behind after its last user image is freed) still gets caught. The old
+    # per-datatype helper also had a mutate-while-iterating bug that let
+    # orphaned HDRI images accumulate across sequences until the process got
+    # OOM-killed -- see remove_orphans_of_datatype's docstring/comment.
+    bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
 
 
 if __name__ == "__main__":

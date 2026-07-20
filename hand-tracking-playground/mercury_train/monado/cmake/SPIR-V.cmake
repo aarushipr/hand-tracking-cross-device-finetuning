@@ -5,7 +5,7 @@
 find_program(GLSLANGVALIDATOR_COMMAND
 	glslangValidator)
 if(NOT GLSLANGVALIDATOR_COMMAND)
-	message(FATAL_ERROR "glslangValidator required - source maintained at https://github.com/KhronosGroup/glslang")
+	message(WARNING "glslangValidator not found - source maintained at https://github.com/KhronosGroup/glslang - shader-building targets will be unavailable, but this doesn't block the training dataloader")
 endif()
 
 #

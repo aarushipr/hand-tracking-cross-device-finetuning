@@ -8,29 +8,28 @@ target_link_libraries(
 		${OpenCV_LIBRARIES}
 		htdev_includes
 		aux_math
-		StereoKitC # uncomment if u want
-		# stereokit
+		# StereoKitC removed: not available/needed for training builds
 		data_generator_kine_lm
 		aux_util
 	)
 
-add_executable(pose_diversity_visualizer pose_diversity_test.cpp)
-
-target_link_libraries(
-	pose_diversity_visualizer
-	PRIVATE
-		${OpenCV_LIBRARIES}
-		htdev_includes
-		aux_math
-		StereoKitC # uncomment if u want
-		# stereokit
-		data_generator_kine_lm
-		aux_util
-		pose_diversity_hand_maker
-	)
-
-target_include_directories(pose_diversity_visualizer PRIVATE ${EIGEN3_INCLUDE_DIR})
-add_sanitizers(pose_diversity_visualizer)
+# pose_diversity_visualizer requires StereoKitC, not needed for training
+# add_executable(pose_diversity_visualizer pose_diversity_test.cpp)
+#
+# target_link_libraries(
+# 	pose_diversity_visualizer
+# 	PRIVATE
+# 		${OpenCV_LIBRARIES}
+# 		htdev_includes
+# 		aux_math
+# 		StereoKitC
+# 		data_generator_kine_lm
+# 		aux_util
+# 		pose_diversity_hand_maker
+# 	)
+#
+# target_include_directories(pose_diversity_visualizer PRIVATE ${EIGEN3_INCLUDE_DIR})
+# add_sanitizers(pose_diversity_visualizer)
 
 add_library(pose_diversity_hand_maker pose_diversity_hand_maker.cpp pose_diversity_hand_maker.h)
 target_link_libraries(
@@ -45,19 +44,21 @@ target_link_libraries(
 	make_proportions
 	)
 
-add_executable(data_generator data_generator.cpp)
-
-target_link_libraries(
-	data_generator
-	PRIVATE
-		${OpenCV_LIBRARIES}
-		aux_math
-		StereoKitC
-		u_random_distribution
-		aux_util
-		pose_diversity_hand_maker
-		external_shls
-	)
-
-target_include_directories(data_generator PRIVATE ${EIGEN3_INCLUDE_DIR})
-add_sanitizers(data_generator)
+# data_generator (the C++ orchestrator that spawns Blender workers) requires
+# StereoKitC, not needed just to build the training dataloader.
+# add_executable(data_generator data_generator.cpp)
+#
+# target_link_libraries(
+# 	data_generator
+# 	PRIVATE
+# 		${OpenCV_LIBRARIES}
+# 		aux_math
+# 		StereoKitC
+# 		u_random_distribution
+# 		aux_util
+# 		pose_diversity_hand_maker
+# 		external_shls
+# 	)
+#
+# target_include_directories(data_generator PRIVATE ${EIGEN3_INCLUDE_DIR})
+# add_sanitizers(data_generator)

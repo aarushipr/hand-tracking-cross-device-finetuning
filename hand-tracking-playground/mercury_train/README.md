@@ -13,6 +13,15 @@ For the C++ dataloader, run `setup.py install --user`. For anything else, it's a
 If you're missing dependencies for something, it's *generally easier to try disabling parts of the build.*
 Depending on what you're doing, you may not need to build the whole thing, and you can get to what you're trying to do much faster.
 
+## Running the data generator
+
+Build the `data_generator` target and the `ad4_stereographic_projection` pybind extension (see Building, above), then run `./run_data_generator.sh`.
+`data_generator.cpp`'s own defaults for the model manifest and output dir point at the original author's machine, so this script resolves them against the actual repo layout instead: `hand-tracking-playground/hand_scans/model_manifest.json` and a fresh `output_new/` dir, both siblings of `working-code/` at the thesis root.
+Run it with no arguments first to see exactly what it resolved before anything starts; see the script's header comment for a low-cost smoke-test invocation, and for how to override any `GEN_*` variable.
+
+**Heads up:** `GEN_SUPERROOT` gets wiped on every startup (the orchestrator clears it before listening), which is why the script defaults away from the existing `output/` dir.
+Only point it there deliberately.
+
 ## Submodules
 
 This repository uses Git submodules.

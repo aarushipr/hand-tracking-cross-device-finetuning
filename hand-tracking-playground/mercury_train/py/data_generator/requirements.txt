@@ -1,0 +1,16 @@
+# Third-party dependencies for py/data_generator, traced from actual imports
+# in blender_main.py, mlib.py, readcsv_wristpose.py, readcsv_fingerpose.py.
+# (bpy, mathutils are Blender-bundled; everything else needed is stdlib.)
+#
+# IMPORTANT: this script runs inside Blender's bundled Python (invoked via
+# `blender -b -P blender_main.py`), which is a separate environment from
+# your system/conda Python. Installing these normally (`pip install -r
+# requirements.txt`) will NOT make them visible to Blender. Install into
+# Blender's own interpreter instead, e.g.:
+#
+#   blender -b --python-expr "import sys, subprocess; subprocess.run([sys.executable, '-m', 'ensurepip']); subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])"
+#
+# (run from this directory, or pass an absolute path to this file.)
+
+pandas
+numpy

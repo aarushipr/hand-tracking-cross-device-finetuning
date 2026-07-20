@@ -1,7 +1,9 @@
 import sys  # nopep8
 import os  # nopep8
 sys.path.insert(0, os.path.dirname(__file__))  # nopep8
-sys.path.append('/home/moses/.local/lib/python3.10/site-packages')  # nopep8
+import site  # nopep8
+# See header.py for why this is computed rather than hardcoded.
+sys.path.append(site.getusersitepackages())  # nopep8
 
 import bpy  # nopep8
 import math  # nopep8
@@ -104,11 +106,17 @@ def load_image(path):
 
 
 def remove_orphans_of_datatype(dt):
-    for obj in dt:
-        if obj.users == 0:
-            print(
-                f"Found orphan object in {dt} with name {obj.name}! Purging!")
-            dt.remove(obj)
+    # NOTE: don't call dt.remove() while iterating over dt directly --
+    # bpy.data.* collections can shift under the iterator when an item is
+    # removed, silently skipping the next entry. Over many sequences this
+    # let orphaned HDRI images (large decoded EXR buffers) pile up instead
+    # of being freed, eventually OOM-killing the process. Snapshot the
+    # candidates first, then remove from that stable list.
+    orphans = [obj for obj in dt if obj.users == 0]
+    for obj in orphans:
+        print(
+            f"Found orphan object in {dt} with name {obj.name}! Purging!")
+        dt.remove(obj)
 
 # Cursed
 
@@ -171,81 +179,153 @@ def make_exr_background(st):
     mappingnode.inputs["Scale"].default_value[1] = np.random.normal(1.0, 0.1)
     mappingnode.inputs["Scale"].default_value[2] = np.random.normal(1.0, 0.1)
 
-    slug = "/3/epics/artificial_data_3/hdris/"
+    # Configurable so this isn't tied to one machine's layout; falls back to
+    # the repo's standard sibling location: <thesis root>/hdris/, i.e.
+    # five levels up from this file (data_generator -> py -> mercury_train ->
+    # hand-tracking-playground -> working-code -> thesis root).
+    default_hdris_dir = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "..", "..", "..", "hdris"))
+    slug = os.environ.get("GEN_HDRIS_DIR", default_hdris_dir)
+
+    if not os.path.isdir(slug):
+        raise FileNotFoundError(
+            f"HDRI directory not found: {slug!r}. Set the GEN_HDRIS_DIR "
+            f"environment variable to point at a folder of .exr/.hdr files.")
+
     choice = random.choice(os.listdir(slug))
 
     exrnode.image = load_image(os.path.join(slug, choice))
 
 
 def add_ambient_occlusion(st):
-    st.blender_scene.eevee.use_gtao = True
-    st.blender_scene.eevee.gtao_distance = 0.23
-    st.blender_scene.eevee.gtao_factor = 1.0
-    st.blender_scene.eevee.gtao_quality = 0.25
-    st.blender_scene.eevee.use_gtao_bent_normals = True
-    st.blender_scene.eevee.use_gtao_bounce = True
+    # EEVEE Next (Blender 4.2+) replaced GTAO with a broader "fast GI"
+    # approximation. Confirmed live against Blender 5.1/5.2 via bl_rna
+    # property descriptions, not just name-matching:
+    #   use_fast_gi     <- use_gtao            (master toggle)
+    #   fast_gi_distance <- gtao_distance       ("max distance other
+    #                        surfaces contribute", same role as before)
+    #   fast_gi_quality  <- gtao_quality        ("precision of fast GI ray
+    #                        marching"; its default of 0.25 matches what
+    #                        this code was already setting)
+    # gtao_factor / use_gtao_bent_normals / use_gtao_bounce have no
+    # equivalent in the new system -- dropped rather than guessed at.
+    st.blender_scene.eevee.use_fast_gi = True
+    st.blender_scene.eevee.fast_gi_distance = 0.23
+    st.blender_scene.eevee.fast_gi_quality = 0.25
 
 
 def make_render_output(st: header.State, make_alpha_output):
-
-    # TODO DISABLED FOR NOW BECAUSE OF HEADER
-    st.blender_scene.render.image_settings.file_format = 'JPEG'
+    # No compositor node graph needed here -- render_and_save_frame() does
+    # everything via a direct scene render + Python-side pixel processing.
+    # Two prior approaches were tried and both broke silently:
+    #   1. CompositorNodeOutputFile (Render Layers -> File Output): gets
+    #      dynamically restricted to OPEN_EXR_MULTILAYER on this Blender
+    #      build regardless of item type (RGBA or FLOAT) -- confirmed
+    #      live. Files written that way can't be read back afterward at
+    #      all: bpy.data.images.load() and bpy.ops.image.open() both
+    #      report size (0, 0) / 0 channels on the resulting .exr despite a
+    #      real, correctly-sized file existing on disk. Confirmed on two
+    #      independent Blender installs, so not an environment quirk.
+    #   2. CompositorNodeViewer (reads bpy.data.images['Viewer Node']
+    #      directly, no file I/O): worked when tested through Blender's
+    #      interactive UI, but came back solid black under real headless
+    #      (-b) execution -- the Viewer Node is fundamentally a UI/preview
+    #      feature and apparently doesn't populate without one.
+    # A direct scene render to a plain (non-multilayer) PNG sidesteps both
+    # failure modes: it's the same rendering mechanism this pipeline has
+    # already been relying on headlessly the whole time, and reading back
+    # a plain single-layer image format (as opposed to multilayer EXR) has
+    # been confirmed to work correctly.
+    #
+    # Explicitly disabling the compositor guards against whatever
+    # pre-existing node setup might already be baked into the artist's
+    # .blend file (see the "Learned this lesson on august 21" history this
+    # function used to have) from interfering with the plain render.
+    st.blender_scene.use_nodes = False
 
     if make_alpha_output:
         st.blender_scene.render.film_transparent = True
     else:
         st.blender_scene.render.film_transparent = False
 
-    st.blender_scene.use_nodes = True
-    node_tree = st.blender_scene.node_tree
 
-    # Learned this lesson on august 21:
-    # If the artist (ie. me, Moses) makes mistakes, there can be stuff in the
-    # compositor node tree that we don't want
-    # and we need to get rid of all of it, no matter what it is.
-    for node in node_tree.nodes:
-        node_tree.nodes.remove(node)
+def render_and_save_frame(st: header.State, frame_idx: int, save_alpha: bool):
+    """Renders the scene's *current* frame (caller sets frame_current
+    beforehand) to a temporary plain RGBA PNG, reads that back, and saves
+    the processed 8-bit monochrome PNG(s) derived from it -- see
+    make_render_output()'s comment for the two approaches that silently
+    broke before this one and why. Deletes the temporary raw PNG and its
+    in-memory datablock once read.
 
-    # node_tree.nodes.remove(node_tree.nodes["Composite"])
+    Called once per frame instead of a single
+    bpy.ops.render.render(animation=True) covering the whole sequence --
+    safe because every bone/empty/camera transform is keyframed per-frame
+    before this runs, so rendering frame_current one at a time is
+    equivalent to rendering the animation in one call.
 
-    # renderlayer
-    renderlayer = node_tree.nodes.new("CompositorNodeRLayers")
+    Applies the same per-frame Gaussian gain noise (sigma drawn uniformly
+    from [2, 12] in 8-bit/uint8 units) matching the noise floor of real XR
+    mono sensors that convert_folder_exr_to_png() used to add.
 
-    # ['Render Layers']
+    imgs_alpha stores 1 - render_alpha, matching the old compositor
+    Math-node MULTIPLY(-1) + ADD(1) pair this replaces -- computed here in
+    numpy instead since the full buffer is already in Python, no need to
+    round-trip it through compositor nodes at all.
+    """
+    scene = st.blender_scene
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.image_settings.color_mode = 'RGBA'
+    scene.render.image_settings.color_depth = '16'
 
-    file_output_rgb = node_tree.nodes.new('CompositorNodeOutputFile')
+    raw_path = os.path.join(
+        st.json_response["output_color_images_folder"],
+        f"_raw_{frame_idx:04d}.png")
+    scene.render.filepath = raw_path
+    bpy.ops.render.render(write_still=True)
 
-    node_tree.links.new(
-        renderlayer.outputs['Image'], file_output_rgb.inputs['Image'])
+    # check_existing=False: don't let Blender hand back a stale cached
+    # datablock from an earlier frame/sequence that happened to reuse this
+    # same temp filename -- always force a fresh read of what's on disk
+    # right now.
+    raw_img = bpy.data.images.load(raw_path, check_existing=False)
+    w, h = raw_img.size
+    pixels = np.array(raw_img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+    bpy.data.images.remove(raw_img)
+    os.remove(raw_path)
 
-    file_output_alpha = node_tree.nodes.new('CompositorNodeOutputFile')
+    def save_mono_png(channel, out_path):
+        sigma = float(np.random.uniform(2.0, 12.0)) / 255.0
+        noisy = channel + \
+            np.random.normal(0.0, sigma, channel.shape).astype(np.float32)
+        noisy = np.clip(noisy, 0.0, 1.0)
 
-    file_output_rgb.base_path = st.json_response["output_color_images_folder"]
-    print(file_output_rgb.base_path)
+        out = np.ones((h, w, 4), dtype=np.float32)
+        out[:, :, 0] = noisy
+        out[:, :, 1] = noisy
+        out[:, :, 2] = noisy
 
-    if not make_alpha_output:
-        return
+        save_img = bpy.data.images.new("_frame_save_tmp", width=w, height=h)
+        save_img.pixels[:] = out.flatten()
+        save_img.filepath_raw = out_path
+        save_img.file_format = 'PNG'
+        save_img.save()
+        bpy.data.images.remove(save_img)
 
-    if False:
-        node_tree.links.new(
-            renderlayer.outputs['Alpha'], file_output_alpha.inputs['Image'])
+    luma = (0.2126 * pixels[:, :, 0]
+            + 0.7152 * pixels[:, :, 1]
+            + 0.0722 * pixels[:, :, 2])
+    color_path = os.path.join(
+        st.json_response["output_color_images_folder"],
+        f"frame_{frame_idx:04d}.png")
+    save_mono_png(luma, color_path)
 
-    else:
-        math_0_multiply = node_tree.nodes.new('CompositorNodeMath')
-        math_0_multiply.operation = 'MULTIPLY'
-        math_0_multiply.inputs[0].default_value = -1
-
-        math_1_add = node_tree.nodes.new('CompositorNodeMath')
-        math_1_add.operation = 'ADD'
-        math_1_add.inputs[0].default_value = 1
-
-        node_tree.links.new(
-            renderlayer.outputs['Alpha'], math_0_multiply.inputs[1])
-        node_tree.links.new(math_0_multiply.outputs[0], math_1_add.inputs[1])
-        node_tree.links.new(
-            math_1_add.outputs[0], file_output_alpha.inputs['Image'])
-
-    file_output_alpha.base_path = st.json_response["output_alpha_images_folder"]
+    if save_alpha:
+        inverted_alpha = 1.0 - pixels[:, :, 3]
+        alpha_path = os.path.join(
+            st.json_response["output_alpha_images_folder"],
+            f"frame_{frame_idx:04d}.png")
+        save_mono_png(inverted_alpha, alpha_path)
 
 
 def load_temp_blenddata(st):

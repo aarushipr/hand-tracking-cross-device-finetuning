@@ -9,6 +9,12 @@
 cmake_minimum_required(VERSION 3.10.2)
 project(MonadoSubmodulerExample VERSION 0.1.0)
 
+# Without this, our set() calls below for XRT_MODULE_MONADO_CLI/GUI don't
+# override Monado's own option() defaults when we add_subdirectory(monado).
+# Needs to be set on the cmake command line too (setup.py does this) because
+# this policy() call alone doesn't propagate into subprojects.
+cmake_policy(SET CMP0077 NEW)
+
 # We make it Debug here to get good backtraces and asserts. Then, after this, we
 # set O3 so it's still fast.
 set(CMAKE_BUILD_TYPE Debug)
@@ -41,7 +47,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/monado/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/monado/cmake/sanitizers")
 
-find_package(ONNXRuntime MODULE REQUIRED)
+# Not REQUIRED: ONNXRuntime is only needed for the export notebooks, not for
+# training or the dataloader. Making it optional avoids failing configure on
+# machines that don't have it installed.
+find_package(ONNXRuntime MODULE)
 
 find_package(Eigen3 3 REQUIRED)
 find_package(
@@ -140,6 +149,13 @@ set(XRT_BUILD_SAMPLES OFF)
 
 set(BUILD_TESTING OFF)
 set(BUILD_DOC OFF)
+
+# monado-cli and monado-gui link against libopencv_dnn/libopencv_imgcodecs,
+# which drag in transitive deps (protobuf, tiff, etc.) we don't want to have
+# to satisfy just to build the training dataloader. We only need Monado's
+# headers, not these executables.
+set(XRT_MODULE_MONADO_CLI OFF)
+set(XRT_MODULE_MONADO_GUI OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

@@ -50,6 +50,11 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}{os.sep}",
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={cfg}",  # not used on MSVC, but no harm
+            # Makes our set() calls in the root CMakeLists.txt override
+            # Monado's own option() defaults (e.g. XRT_MODULE_MONADO_CLI/GUI)
+            # when add_subdirectory(monado) runs. The cmake_policy() call in
+            # the root CMakeLists.txt alone doesn't propagate into subprojects.
+            "-DCMAKE_POLICY_DEFAULT_CMP0077=NEW",
         ]
         build_args = []
         # Adding CMake arguments set as environment variable
@@ -122,7 +127,10 @@ class CMakeBuild(build_ext):
             ["cmake", ext.sourcedir] + cmake_args, cwd=build_temp, check=True
         )
         subprocess.run(
-            ["cmake", "--build", "."] + build_args, cwd=build_temp, check=True
+            ["cmake", "--build", ".", "--target", "ad4_stereographic_projection"]
+            + build_args,
+            cwd=build_temp,
+            check=True,
         )
 
 

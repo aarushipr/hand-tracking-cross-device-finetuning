@@ -122,7 +122,10 @@ class ArtificialDataset(torch.utils.data.Dataset):
         self.num_sequences = len(os.listdir(superroot))
 
         if (header.env_settings.loadfast):
-            self.num_sequences = 25
+            # Was hardcoded to 25, which crashes if fewer sequences exist
+            # locally (e.g. the 15-sequence output/ sanity set) — cap at
+            # whatever's actually on disk instead.
+            self.num_sequences = min(25, self.num_sequences)
 
         self.camera_poses_seq_array = np.zeros(
             (self.num_sequences, 200, 7 + 4))
@@ -163,8 +166,11 @@ class ArtificialDataset(torch.utils.data.Dataset):
         # dataset locations (and would fail to load entirely for anyone
         # whose data doesn't live at that exact literal path). Both now
         # derive from the same `superroot` used for the CSV loading.
-        img_color_path = os.path.join(superroot, seqname, "imgs_color", f"Image{numstr}.jpg")
-        img_alpha_path = os.path.join(superroot, seqname, "imgs_alpha", f"Image{numstr}.jpg")
+        # Matches the actual on-disk naming from mlib.py's Blender output
+        # (file_name{NNNN}.png, mono 8-bit) — was "Image{numstr}.jpg", which
+        # doesn't match anything on disk and silently loaded nothing.
+        img_color_path = os.path.join(superroot, seqname, "imgs_color", f"file_name{numstr}.png")
+        img_alpha_path = os.path.join(superroot, seqname, "imgs_alpha", f"file_name{numstr}.png")
 
         alpha: bool = os.path.exists(img_alpha_path)
         if not alpha:
