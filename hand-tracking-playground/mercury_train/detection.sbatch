@@ -1,10 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name="xr-handtrack-detection-workingcode"
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=4
+# ↑ chair SLURM policy: no more than 4 CPU cores per GPU requested.
 #SBATCH --gres=gpu:1,VRAM:24G
 #SBATCH --mem=32G
 #SBATCH --time=08:00:00
+# ↑ Do NOT raise this past 8:00:00 without first confirming your account
+#   isn't subject to the practical-student cap (max 1x 24GB GPU, 8h jobs,
+#   requires --part=PRACT --qos=practical_course below).
+# If you ARE a practical student, uncomment the next two lines (mandatory):
+# #SBATCH --part=PRACT
+# #SBATCH --qos=practical_course
 #SBATCH --mail-type=END,FAIL
 #SBATCH --output=/storage/slurm/logs/slurm-%j.out
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out

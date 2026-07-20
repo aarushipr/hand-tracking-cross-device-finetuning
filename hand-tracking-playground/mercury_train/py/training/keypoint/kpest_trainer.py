@@ -163,7 +163,10 @@ def train_loop(device, dataloader, model, optimizer):
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     num_devices = 1
-    batch_size_per_device = 256  # Warning: high values can OOM RAM, be careful
+    # 256 OOM'd on a 7.92GB GPU (confirmed 2026-07-20). Lowered to a safer
+    # default that should fit on most single GPUs; raise it back up if you
+    # confirm a bigger card (e.g. the 24GB train.sbatch requests) handles it.
+    batch_size_per_device = 64  # Warning: high values can OOM RAM, be careful
     if device.type == "cuda":
         num_devices = torch.cuda.device_count()
         print(f"Let's use {num_devices} GPUs!")
