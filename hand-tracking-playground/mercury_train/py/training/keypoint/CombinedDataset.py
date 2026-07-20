@@ -22,6 +22,14 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
+        # (Old comment here claimed "everything breaks if artificialdataset
+        # is not the biggest" — verified false: the num_times_to_repeat math
+        # below scales every dataset to (amt_i / biggest_amt) * biggest_len
+        # samples, which is proportional to amt_i regardless of which
+        # dataset happens to be numerically largest. Confirmed in practice
+        # 2026-07-20 — panoptic_synth was the largest by raw sample count
+        # and the resulting mix was still correctly weighted.)
+
         # Skip any real dataset whose CSV hasn't been munged yet, rather than
         # crashing outright — lets training start on whatever real data is
         # actually ready (e.g. nikitha.csv is an internal capture that may

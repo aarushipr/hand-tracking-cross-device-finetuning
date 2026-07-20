@@ -196,7 +196,11 @@ class RandoDataset(torch.utils.data.Dataset):
 
         acc_idx = 0
 
-        filename = b[acc_idx]
+        # .iloc[] instead of bare [] — pandas is deprecating positional
+        # integer indexing via Series.__getitem__ (was spamming a
+        # FutureWarning on every single sample, drowning out real log
+        # output during training).
+        filename = b.iloc[acc_idx]
         acc_idx += 1
 
         kps = np.zeros((22, 3))
@@ -205,22 +209,22 @@ class RandoDataset(torch.utils.data.Dataset):
 
         for i in range(22):
             for j in range(3):
-                kps[i][j] = b[acc_idx]
+                kps[i][j] = b.iloc[acc_idx]
                 acc_idx += 1
 
         for i in range(22):
-            gt_xy_valid[i] = b[acc_idx]
+            gt_xy_valid[i] = b.iloc[acc_idx]
             acc_idx += 2
-            gt_depth_valid[i] = b[acc_idx]
+            gt_depth_valid[i] = b.iloc[acc_idx]
             acc_idx += 1
 
-        is_right = bool(b[acc_idx])
+        is_right = bool(b.iloc[acc_idx])
         acc_idx += 1
 
         mask_filename = None
         if (len(b) == acc_idx + 1):
             # has mask
-            mask_filename = b[acc_idx]
+            mask_filename = b.iloc[acc_idx]
 
         mask = None
 

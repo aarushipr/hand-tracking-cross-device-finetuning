@@ -145,7 +145,7 @@ class ArtificialDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.len
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, retries_left=5):
 
         seq_idx = idx // 200  # // is integer division! Rounds down!
         frame_idx = idx % 200
@@ -176,18 +176,35 @@ class ArtificialDataset(torch.utils.data.Dataset):
         if not alpha:
             img_alpha_path = ""
         # print(f"getting sample, instance {instance_num}")
-        ad4_stereographic_projection.prepare_sample(
-            img_color_path,
-            img_alpha_path,
-            self.hand_poses_seq_array[seq_idx],
-            self.camera_poses_seq_array[seq_idx],
-            frame_idx,
-            out_joints_gt,
-            out_joints_pose_predicted,
-            out_image,
-            out_mask,
-            out_elbow,
-            out_curls)
+        try:
+            ad4_stereographic_projection.prepare_sample(
+                img_color_path,
+                img_alpha_path,
+                self.hand_poses_seq_array[seq_idx],
+                self.camera_poses_seq_array[seq_idx],
+                frame_idx,
+                out_joints_gt,
+                out_joints_pose_predicted,
+                out_image,
+                out_mask,
+                out_elbow,
+                out_curls)
+        except Exception as e:
+            # A single missing/corrupt frame (e.g. cv2 "empty Mat" assertion
+            # when img_color_path fails to load) would otherwise kill an
+            # entire multi-hour unattended SLURM job over one bad file.
+            # Log which file failed and substitute a different random
+            # sample instead of crashing — bounded retries in case of a
+            # systemic problem rather than one bad frame.
+            print(f"[ArtificialData] WARNING: failed to load {img_color_path} "
+                  f"({type(e).__name__}: {e}). Substituting a random sample.")
+            if retries_left <= 0:
+                raise RuntimeError(
+                    f"[ArtificialData] Too many consecutive failed samples — "
+                    f"last attempted {img_color_path}. This looks like a "
+                    f"systemic data problem, not one bad frame."
+                ) from e
+            return self.__getitem__(random.randrange(self.len), retries_left - 1)
         # print(f"DONE, instance {instance_num}")
 
         # in_img = np.frombuffer(response.image_data, dtype='uint8').copy()
