@@ -4,6 +4,7 @@ import torch
 from py.training.detection.HMDHandRectsDataset import HMDHandRectsDataset
 from py.training.detection.EpicKitchensDataset import EpicKitchensDataset
 from py.training.detection.DarknetDataset import DarknetDataset
+from py.training.detection.SyntheticDetectionDataset import SyntheticDetectionDataset
 import py.training.detection.local_config as local_config
 
 
@@ -30,12 +31,28 @@ class CombinedDataset(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
-        # Unlike the keypoint pipeline, detection has no synthetic fallback —
-        # there's nothing to train on at all if every real source is
-        # missing. Each source is skipped individually (rather than the
-        # whole thing crashing on the first missing path) so training can
-        # start on whatever's actually available as data sources get
-        # located one at a time.
+        # Primary training source: same synthetic generator KeyNet already
+        # trains on, with bboxes derived from the 3D hand joints (see
+        # SyntheticDetectionDataset's docstring for the projection method
+        # and why it's trustworthy). This means DetNet now trains under the
+        # same camera-randomization regime as KeyNet instead of depending
+        # entirely on real, hard-to-source datasets for a training signal
+        # at all -- those move to val/test below, and are optional.
+        synthetic_path = getattr(local_config, "artificial_dataset_path", None)
+        if synthetic_path and os.path.isdir(synthetic_path):
+            # Highest weight -- this is the primary training source now,
+            # matching KeyNet's synthetic-first design.
+            b(SyntheticDetectionDataset(), 4)
+        else:
+            print("[CombinedDataset] Skipping synthetic detection data — "
+                  "local_config.artificial_dataset_path not set or missing. "
+                  "DetNet will have no training signal unless a real source "
+                  "below is available.")
+
+        # Real sources below are now val/test-oriented, not training
+        # blockers. Each is skipped individually (rather than the whole
+        # thing crashing on the first missing path) so training can start
+        # on whatever's actually available as data sources get located.
         hmdhandrect_datasets = []
         hmdhandrect_root = local_config.hmdhandrects_location
         # subject02 sequences are held out as the validation set.
@@ -79,9 +96,11 @@ class CombinedDataset(torch.utils.data.Dataset):
         if not datasets:
             raise RuntimeError(
                 "[CombinedDataset] No detection training sources available at all — "
-                "HMDHandRects, EgoHands, and EpicKitchens are all missing/unconfigured "
-                "in local_config.py. Detection has no synthetic fallback (unlike keypoint), "
-                "so at least one real source must be located before training can run."
+                "the synthetic source (local_config.artificial_dataset_path) and all "
+                "real sources (HMDHandRects, EgoHands, EpicKitchens) are missing/"
+                "unconfigured in local_config.py. Set artificial_dataset_path to the "
+                "same directory keypoint's local_config.py uses — that alone is "
+                "enough to train."
             )
 
         repeat_datasets = []

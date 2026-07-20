@@ -5,12 +5,18 @@
 # local_config.py itself is gitignored (per-machine, never synced by git) —
 # that's why this template exists and is committed instead.
 #
-# Unlike the keypoint pipeline, nobody has confirmed where HMDHandRects /
-# EgoHands / EpicKitchens actually live on this cluster yet. Run
-# `ls /storage/user/praa/` after SSHing in and fill in the real paths below
-# before submitting detection.sbatch — it will fail immediately on dataset
-# load otherwise.
+# DetNet's primary training source: same Blender-rendered synthetic
+# sequences the keypoint pipeline already uses (SyntheticDetectionDataset
+# derives bboxes from the 3D hand joints via pinhole projection). This
+# should point at the same directory as keypoint's
+# local_config.artificial_dataset_path -- it's the same generator output.
+artificial_dataset_path = "/storage/user/praa/synth_hands_output"
 
+# HMDHandRects / EgoHands / EpicKitchens are now val/test-only, not
+# training blockers -- CombinedDataset.py skips any of these gracefully if
+# missing/unconfigured. Fill in real paths as you locate them (ask your
+# supervisor for HMDHandRects specifically, it has no public source), but
+# training will run fine without them thanks to the synthetic source above.
 hmdhandrects_location = "/storage/user/praa/REPLACE_ME_HMDHandRects/"
 egohands_convert = "/storage/user/praa/REPLACE_ME_EgoHands/"
 
