@@ -1,3 +1,4 @@
+import os
 import torch
 
 from py.training.detection.HMDHandRectsDataset import HMDHandRectsDataset
@@ -29,38 +30,59 @@ class CombinedDataset(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
+        # Unlike the keypoint pipeline, detection has no synthetic fallback —
+        # there's nothing to train on at all if every real source is
+        # missing. Each source is skipped individually (rather than the
+        # whole thing crashing on the first missing path) so training can
+        # start on whatever's actually available as data sources get
+        # located one at a time.
         hmdhandrect_datasets = []
-
+        hmdhandrect_root = local_config.hmdhandrects_location
         # subject02 sequences are held out as the validation set.
         # They must never appear here — adding them would contaminate evaluation.
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject00_sequence00"))
+        for seq_name in [
+            "train_subject00_sequence00",
+            "train_subject00_sequence01",
+            "train_subject00_sequence02",
+            "train_subject00_sequence03",
+            "train_subject01_sequence00",
+            "train_subject01_sequence01",
+        ]:
+            seq_root = f"{hmdhandrect_root}/sequences/{seq_name}"
+            ann_path = os.path.join(seq_root, HMDHandRectsDataset.ann)
+            if os.path.exists(ann_path):
+                hmdhandrect_datasets.append(HMDHandRectsDataset(seq_root))
+            else:
+                print(f"[CombinedDataset] Skipping HMDHandRects {seq_name} — not found at {ann_path}")
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject00_sequence01"))
+        if hmdhandrect_datasets:
+            # HMDHandRects: egocentric XR — the most device-relevant data, weight up.
+            b(torch.utils.data.ConcatDataset(hmdhandrect_datasets), 3)
+        else:
+            print("[CombinedDataset] Skipping HMDHandRects entirely — no sequences found")
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject00_sequence02"))
+        egohands_labels_dir = os.path.join(local_config.egohands_convert, "labels", "train")
+        if os.path.isdir(egohands_labels_dir):
+            # EgoHands: egocentric but not XR hardware — still useful, moderate weight.
+            b(DarknetDataset(local_config.egohands_convert), 1)
+        else:
+            print(f"[CombinedDataset] Skipping EgoHands — not found at {egohands_labels_dir}")
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject00_sequence03"))
+        if os.path.isdir(local_config.kitchens_annotations) and os.path.isdir(local_config.kitchens_images):
+            # EpicKitchens: GoPro chest-mounted — wrong device type for XR generalisation.
+            # Kept for diversity but weight reduced so it doesn't dominate training.
+            b(EpicKitchensDataset(), 2)
+        else:
+            print(f"[CombinedDataset] Skipping EpicKitchens — not found at "
+                  f"{local_config.kitchens_annotations} / {local_config.kitchens_images}")
 
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject01_sequence00"))
-
-        hmdhandrect_datasets.append(HMDHandRectsDataset(
-            f"{local_config.hmdhandrects_location}/sequences/train_subject01_sequence01"))
-
-        # HMDHandRects: egocentric XR — the most device-relevant data, weight up.
-        b(torch.utils.data.ConcatDataset(hmdhandrect_datasets), 3)
-
-        # EgoHands: egocentric but not XR hardware — still useful, moderate weight.
-        b(DarknetDataset(
-            local_config.egohands_convert), 1)
-
-        # EpicKitchens: GoPro chest-mounted — wrong device type for XR generalisation.
-        # Kept for diversity but weight reduced so it doesn't dominate training.
-        b(EpicKitchensDataset(), 2)
+        if not datasets:
+            raise RuntimeError(
+                "[CombinedDataset] No detection training sources available at all — "
+                "HMDHandRects, EgoHands, and EpicKitchens are all missing/unconfigured "
+                "in local_config.py. Detection has no synthetic fallback (unlike keypoint), "
+                "so at least one real source must be located before training can run."
+            )
 
         repeat_datasets = []
 
