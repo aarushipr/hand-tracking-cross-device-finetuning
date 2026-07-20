@@ -169,10 +169,14 @@ def main():
         print(f"Let's use {num_devices} GPUs!")
 
     wandb_name = "keypoint_estimator_training"
+    # No entity= specified: this was hardcoded to "col" (the original
+    # author's Collabora team), which the current wandb login has no write
+    # access to and fails with a permission error. Omitting entity lets
+    # wandb use whatever account is actually logged in via `wandb login`.
     if header.env_settings.wandb_enabled:
-        wandb.init(project=wandb_name, entity="col")
+        wandb.init(project=wandb_name)
     else:
-        wandb.init(project=wandb_name, entity="col", mode="disabled")
+        wandb.init(project=wandb_name, mode="disabled")
 
     # On SLURM, cpu_count() returns all CPUs on the node, not just the ones
     # allocated to this job. SLURM_CPUS_PER_TASK is the correct value to use.

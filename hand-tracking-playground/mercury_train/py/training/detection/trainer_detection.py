@@ -96,7 +96,10 @@ def main():
 
     # wandb reads WANDB_MODE from the environment — set WANDB_MODE=disabled in
     # your SLURM script to run without logging, or omit it to log normally.
-    wandb.init(project="hand_detection_training", entity="col")
+    # No entity= specified: was hardcoded to "col" (the original author's
+    # Collabora team), which fails with a permission error for any other
+    # wandb login. Omitting it uses whatever account is actually logged in.
+    wandb.init(project="hand_detection_training")
 
     # On SLURM, cpu_count() returns all CPUs on the node, not just the ones
     # allocated to this job. SLURM_CPUS_PER_TASK is the correct value to use.
