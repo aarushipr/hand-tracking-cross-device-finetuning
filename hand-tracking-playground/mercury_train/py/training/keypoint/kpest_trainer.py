@@ -193,20 +193,40 @@ def main():
 
     # Validation (run every epoch): FreiHand — a different capture setup from
     # training data, tests whether the model generalises to a new real dataset.
-    dataloader_val = DataLoader(
-        RandoDataset(local_config.real_datasets_basepath, "frei_gs.csv"),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers)
+    #
+    # Skipped entirely in loadfast mode: RandoDataset's __init__ eagerly
+    # pd.read_csv()s frei_gs.csv/tom.csv, which crashes immediately (before
+    # any training batch even runs) if those real datasets aren't present.
+    # loadfast is meant to be a synthetic-data-only smoke test — CombinedDataset
+    # already skips real datasets for training on the same principle, this
+    # just extends it to validation/test.
+    dataloader_val = None
+    dataloader_test = None
+    if not header.env_settings.loadfast:
+        dataloader_val = DataLoader(
+            RandoDataset(local_config.real_datasets_basepath, "frei_gs.csv"),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers)
 
-    # Test (run once after training): Tom OpenHands — held out entirely.
-    # Replace with HOT3D / UmeTrack once those datasets are obtained, as they
-    # represent true cross-device generalisation to different XR hardware.
-    dataloader_test = DataLoader(
-        RandoDataset(local_config.real_datasets_basepath, "tom.csv"),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers)
+        # Test (run once after training): Tom OpenHands — held out entirely.
+        # Replace with HOT3D / UmeTrack once those datasets are obtained, as they
+        # represent true cross-device generalisation to different XR hardware.
+        #
+        # tom.csv doesn't exist yet as of 2026-07-20 (the source dataset is
+        # harder to source than FreiHand/Panoptic) — skip gracefully rather
+        # than crash on startup, same reasoning as CombinedDataset's
+        # b_if_present. Final test evaluation below is skipped too if this
+        # is None.
+        tom_csv_path = os.path.join(local_config.real_datasets_basepath, "tom.csv")
+        if os.path.exists(tom_csv_path):
+            dataloader_test = DataLoader(
+                RandoDataset(local_config.real_datasets_basepath, "tom.csv"),
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers)
+        else:
+            print(f"[kpest_trainer] Skipping test set — tom.csv not found at {tom_csv_path}")
 
     model = KeyNet.KeyNet()
     model = torch.nn.DataParallel(model).to(device)
@@ -237,16 +257,17 @@ def main():
         model.train()
         train_loop(device, dataloader_train, model, optimizer)
 
+        # Skip validation and checkpointing when in fast/debug mode — model is
+        # only trained on a tiny slice of data and isn't worth keeping, and
+        # dataloader_val is None (real datasets weren't loaded, see above).
+        if header.env_settings.loadfast:
+            continue
+
         model.eval()
         val_result = validatoor.validation_loop(
             device, dataloader_val, model, mse, "val", False, epoch)
         mean_validation_loss = val_result.mean_loss_no_pred
         model.train()
-
-        # Skip saving checkpoints when in fast/debug mode — model is only
-        # trained on a tiny slice of data and isn't worth keeping.
-        if header.env_settings.loadfast:
-            continue
 
         is_best = mean_validation_loss < best_validation_loss
         if is_best:
@@ -277,10 +298,15 @@ def main():
     # Run the test set once after training is complete.
     # The test set is never seen during training or used for checkpoint selection,
     # so this gives an unbiased measure of final model performance.
-    print("Training complete. Running final test evaluation...")
-    model.eval()
-    test_result = validatoor.validation_loop(
-        device, dataloader_test, model, mse, "test", False, epoch)
+    # (In practice the epoch loop above runs until manually stopped, so this
+    # only executes if that loop is ever given a real exit condition.)
+    if dataloader_test is not None:
+        print("Training complete. Running final test evaluation...")
+        model.eval()
+        test_result = validatoor.validation_loop(
+            device, dataloader_test, model, mse, "test", False, epoch)
+    else:
+        print("Skipping final test evaluation — tom.csv was not available.")
     test_loss = test_result.mean_loss_no_pred
     print(f"Final test loss: {test_loss:.4f}")
     wandb.log({"test_loss": test_loss})

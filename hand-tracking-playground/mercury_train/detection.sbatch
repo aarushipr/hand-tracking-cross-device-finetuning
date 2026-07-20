@@ -28,9 +28,8 @@ export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/openc
 # Set WANDB_API_KEY in ~/.bashrc, or run `wandb login` once interactively.
 # export WANDB_MODE=disabled   # uncomment to disable wandb instead
 
-# CHANGE ME: same placeholder as train.sbatch — set to wherever you actually
-# clone/rsync working-code on the cluster.
-REPO_ROOT="/home/stud/praa/storage/user/working_code_mercury_train"
+# Confirmed clone location (2026-07-20) — matches train.sbatch.
+REPO_ROOT="/storage/user/praa/working_code_mercury_train/hand-tracking-playground/mercury_train"
 SCRIPT_DIR="$REPO_ROOT/py/training/detection"
 
 # ---------------------------------------------------------------------------

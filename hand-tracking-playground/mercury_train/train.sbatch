@@ -40,13 +40,10 @@ export AD4_ENABLEWANDB=1
 # when fewer than 25 sequences exist on disk).
 export AD4_LOADFAST=0
 
-# ---------------------------------------------------------------------------
-# CHANGE ME: wherever you actually clone/rsync working-code to on the
-# cluster. This is a placeholder — parallel to the root mercury_train repo's
-# /home/stud/praa/storage/user/mercury_train, but distinct so the two
-# checkouts don't collide.
-# ---------------------------------------------------------------------------
-REPO_ROOT="/home/stud/praa/storage/user/working_code_mercury_train"
+# Confirmed clone location (2026-07-20): includes the
+# hand-tracking-playground/mercury_train subpath, unlike the root repo which
+# was cloned directly as "mercury_train".
+REPO_ROOT="/storage/user/praa/working_code_mercury_train/hand-tracking-playground/mercury_train"
 SCRIPT_DIR="$REPO_ROOT/py/training/keypoint"
 
 # ---------------------------------------------------------------------------

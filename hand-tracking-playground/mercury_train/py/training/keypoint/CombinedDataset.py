@@ -1,3 +1,4 @@
+import os
 import torch
 
 # from InterHandSequential import AwfulCombinedInterHandDataset
@@ -21,12 +22,23 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
+        # Skip any real dataset whose CSV hasn't been munged yet, rather than
+        # crashing outright — lets training start on whatever real data is
+        # actually ready (e.g. nikitha.csv is an internal capture that may
+        # not be located yet) instead of blocking on every source at once.
+        def b_if_present(csv_name, weight):
+            csv_path = os.path.join(f"{datasets_basepath}/", csv_name)
+            if os.path.exists(csv_path):
+                b(RandoDataset(f"{datasets_basepath}/", csv_name), weight)
+            else:
+                print(f"[CombinedDataset] Skipping {csv_name} — not found at {csv_path}")
+
         # freihand and tom are held out for validation and testing respectively.
         # They must never appear here — adding them would contaminate evaluation.
         if not header.env_settings.loadfast:
-            b(RandoDataset(f"{datasets_basepath}/", "nikitha.csv"), 0.6)
-            b(RandoDataset(f"{datasets_basepath}/", "panoptic_manual.csv"), 0.8)
-            b(RandoDataset(f"{datasets_basepath}/", "panoptic_synth.csv"), 0.8)
+            b_if_present("nikitha.csv", 0.6)
+            b_if_present("panoptic_manual.csv", 0.8)
+            b_if_present("panoptic_synth.csv", 0.8)
 
         b(ArtificialDataset(), 2.0)
 
