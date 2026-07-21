@@ -122,7 +122,9 @@ class HOT3DDetectionDataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
+    import os
     import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../'))
     ds = HOT3DDetectionDataset(root=sys.argv[1], sequence_names=sys.argv[2:])
     print(f"{len(ds)} samples")
     samp = ds[0]

@@ -18,7 +18,12 @@ import sys
 import cv2
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _THIS_DIR)
+# py.training.common.* is imported as an absolute-from-repo-root import by
+# augmentation.py (and everything downstream of it) -- needs the mercury_train
+# root on sys.path too, same fix trainer_detection.py's __main__ block does.
+sys.path.insert(0, os.path.join(_THIS_DIR, "../../../"))
 from HOT3DDetectionDataset import HOT3DDetectionDataset  # noqa: E402
 
 
