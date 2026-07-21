@@ -51,22 +51,40 @@ class HOT3DDetectionDataset(torch.utils.data.Dataset):
         # and how CombinedDataset's num_times_to_repeat weighting expects
         # len()/__getitem__ to behave). Real per-source frame counts here
         # are small (single-digit thousands per clip), so this is fine.
-        self.samples = list(build_hand_dataset(
+        raw_samples = list(build_hand_dataset(
             root, sequence_names,
             load_monochrome=True, load_rgb=False,
             output_crops=False,
         ))
 
+        # Aria/Quest headsets have multiple monochrome streams per frame
+        # (e.g. side-facing wide-FOV SLAM cameras vs. others) -- an early
+        # version of this loader picked whichever stream ID sorted first
+        # alphabetically, which turned out to frequently NOT have a good
+        # view of the hands (verified visually: boxes landing on empty
+        # background in ~half of a random sample). Rather than guess which
+        # specific stream ID is "the good one" without documentation, use
+        # every available stream as its own training sample -- bad-angle
+        # streams naturally end up with exists=0 via augment_image's
+        # existing box_in_image visibility filter, good-angle streams
+        # contribute real data. Also multiplies available data for free,
+        # which the original UmeTrack converter's docstring flagged as a
+        # natural follow-up.
+        self.frame_stream_pairs = [
+            (sample, stream_id)
+            for sample in raw_samples
+            for stream_id in sample.images.keys()
+        ]
+
     def __len__(self):
-        return len(self.samples)
+        return len(self.frame_stream_pairs)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+        sample, stream_id = self.frame_stream_pairs[idx]
 
         if not sample.images or not sample.cameras:
             return self._empty_sample()
 
-        stream_id = sorted(sample.images.keys())[0]
         image = sample.images[stream_id]
         camera = sample.cameras[stream_id]
 
@@ -87,6 +105,21 @@ class HOT3DDetectionDataset(torch.utils.data.Dataset):
                     hand_pose_collection.umetrack.wrist_xform.detach().cpu().numpy()[:3, 3]
                 )
                 points_world = np.vstack([wrist_pos[None, :], landmarks])  # (21, 3)
+
+                # Guard against fisheye distortion polynomials producing a
+                # plausible-looking but wrong window coordinate for points
+                # well outside the camera's real field of view (a known
+                # limitation of polynomial distortion fits) -- same check
+                # dataset.py's own warp_image() uses ("mask out points with
+                # negative z coordinates"). Without this, a hand that's
+                # actually behind/beside this particular camera stream can
+                # still produce an in-bounds-looking bbox that doesn't
+                # correspond to anything visible in the image -- this is
+                # what verify_hot3d_visual.py caught (~half of a random
+                # sample had boxes not landing on any visible hand).
+                eye_pts = camera.world_to_eye(points_world)
+                if np.any(eye_pts[:, 2] <= 0):
+                    continue
 
                 # world_to_window3 handles projection + distortion + window
                 # scaling correctly for whatever camera model this stream
