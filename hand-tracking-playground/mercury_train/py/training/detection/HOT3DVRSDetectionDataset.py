@@ -101,6 +101,18 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
             aria_provider = AriaDataProvider(paths.vrs_filepath, mps_folder_path=None)
 
             for stream_id in aria_provider.get_image_stream_ids():
+                # Skip the RGB camera (Aria RecordableTypeId 214, "camera-rgb")
+                # -- this project's camera model is 2 monochrome cameras
+                # (matching target headset hardware), same reason
+                # HOT3DDetectionDataset.py passes load_monochrome=True,
+                # load_rgb=False. Keeps only camera-slam-left/-right
+                # (type 1201), which are mono and also give the stereo pair
+                # the 2-cam model expects. Mixing in RGB frames would also
+                # crash augmentation/heatmap conversion downstream, which
+                # assumes single-channel input.
+                if str(stream_id).startswith("214-"):
+                    continue
+
                 timestamps = aria_provider.get_sequence_timestamps(
                     stream_id, TimeDomain.TIME_CODE
                 )
