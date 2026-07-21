@@ -136,23 +136,30 @@ def main():
               f"angle_from_mean={angle_from_mean[i]:.1f} deg")
     print()
 
-    # Assign each of the 20 landmarks to whichever bone it's MOST skinned
-    # to (argmax weight), then to whichever finger chain contains that
-    # bone. This directly answers "which 4 landmarks belong to finger N,
-    # and in this model's real order, which finger is N?" with no
-    # assumption about thumb/index/middle/ring/pinky ordering at all.
-    primary_bone = np.array([
-        bone_indices[i, np.argmax(bone_weights[i])] for i in range(len(landmark_rest_positions))
+    # First attempt used argmax(skinning weight) to assign each landmark to
+    # a bone -- that produced clearly wrong, wildly uneven counts (7 vs 1
+    # landmarks per finger instead of 4 each), most likely because
+    # skinning weights are blended across multiple bones near a joint and
+    # argmax doesn't reliably pick the "owning" frame. Nearest rest-pose
+    # 3D distance is far more direct: a landmark and its owning frame
+    # should sit at nearly the same position in the rest pose regardless
+    # of how blended its skinning weights are.
+    all_frame_positions = joint_rest_positions  # (22, 3)
+    nearest_frame = np.array([
+        np.argmin(np.linalg.norm(all_frame_positions - landmark_rest_positions[i], axis=1))
+        for i in range(20)  # only the 20 canonical landmarks, see module docstring
     ])
 
-    print("Landmark -> finger-chain-index assignment (0-indexed by discovery order above):")
+    print("Landmark -> finger-chain-index assignment via nearest rest-pose frame "
+          "(0-indexed by discovery order above):")
     for finger_i, chain in enumerate(finger_frame_chains):
-        landmark_ids = [i for i in range(20) if primary_bone[i] in chain]
+        landmark_ids = [i for i in range(20) if nearest_frame[i] in chain]
         # Order landmarks within the finger by distance from the chain
         # root's rest position (proxy for mcp -> pip -> dip -> tip order).
         root_pos = joint_rest_positions[chain[0]]
         landmark_ids.sort(key=lambda i: np.linalg.norm(landmark_rest_positions[i] - root_pos))
-        print(f"  finger chain {finger_i} (frames {chain}): landmarks {landmark_ids}")
+        print(f"  finger chain {finger_i} (frames {chain}): landmarks {landmark_ids} "
+              f"(expected 4 -- if not, something's still off)")
 
     print()
     print("Compare this grouping/order against the assumption in")
