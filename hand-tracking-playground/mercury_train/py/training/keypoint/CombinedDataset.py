@@ -47,6 +47,11 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             b_if_present("nikitha.csv", 0.6)
             b_if_present("panoptic_manual.csv", 0.8)
             b_if_present("panoptic_synth.csv", 0.8)
+            # Verified 2026-07-21 via diagnose_umetrack_landmark_order.py —
+            # landmark permutation confirmed against real skeleton data, not
+            # guessed (see convert_umetrack_to_rando_csv.py). Egocentric XR
+            # headset data, the most device-relevant real source available.
+            b_if_present("umetrack.csv", 0.8)
 
         b(ArtificialDataset(), 2.0)
 
