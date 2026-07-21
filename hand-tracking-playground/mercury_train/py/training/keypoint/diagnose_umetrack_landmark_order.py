@@ -61,13 +61,18 @@ def main():
         print("Couldn't find a crop with hand_shape data -- try more/different --sequences.")
         return
 
-    joint_parent = hand_model.joint_parent.cpu().numpy()
-    joint_first_child = hand_model.joint_first_child.cpu().numpy()
-    joint_next_sibling = hand_model.joint_next_sibling.cpu().numpy()
-    landmark_rest_positions = hand_model.landmark_rest_positions.cpu().numpy()  # (20, 3)
+    joint_parent = hand_model.joint_parent.cpu().numpy().astype(int)
+    joint_first_child = hand_model.joint_first_child.cpu().numpy().astype(int)
+    joint_next_sibling = hand_model.joint_next_sibling.cpu().numpy().astype(int)
+    landmark_rest_positions = hand_model.landmark_rest_positions.cpu().numpy()
     bone_weights = hand_model.landmark_rest_bone_weights.cpu().numpy()
     bone_indices = hand_model.landmark_rest_bone_indices.cpu().numpy()
     joint_rest_positions = hand_model.joint_rest_positions.cpu().numpy()
+
+    NO_NODE = len(joint_parent)  # sentinel seen in practice: 255 (out-of-range), not -1
+
+    def is_valid(idx):
+        return 0 <= idx < len(joint_parent)
 
     print(f"num joint frames: {len(joint_parent)}, num landmarks: {len(landmark_rest_positions)}")
     print(f"joint_parent: {joint_parent.tolist()}")
@@ -75,33 +80,60 @@ def main():
     print(f"joint_next_sibling: {joint_next_sibling.tolist()}")
     print()
 
-    # NUM_JOINT_FRAMES = 1 (root) + 1 (wrist) + 3*5 (finger frames) = 17
-    # Frame 0 = root, frame 1 = wrist (per umetrack_hand_model.py's
-    # NUM_JOINT_FRAMES comment). Walk wrist's children to get the five
-    # finger-chain roots IN THE ORDER THE MODEL ACTUALLY STORES THEM.
-    WRIST_FRAME = 1
-    finger_chain_roots = []
-    child = joint_first_child[WRIST_FRAME]
-    while child != -1:
-        finger_chain_roots.append(int(child))
-        child = joint_next_sibling[child]
+    # This model's actual layout (seen from the printed arrays) is NOT the
+    # generic "root + wrist + 3*5 finger frames = 17" described in
+    # umetrack_hand_model.py's comment -- that's evidently just a default,
+    # not what real downloaded data uses. Here there are 6 top-level chains
+    # (parent == NO_NODE for each chain root), sibling-linked to each other
+    # regardless of their own "no parent" status. Discover them by walking
+    # next_sibling starting from frame 0, rather than assuming a specific
+    # wrist frame index.
+    top_level_chain_roots = []
+    node = 0
+    while is_valid(node):
+        top_level_chain_roots.append(node)
+        node = joint_next_sibling[node]
 
-    print(f"Finger chain root frames, in the model's real sibling order: {finger_chain_roots}")
-    print(f"(expected 5 entries for 5 fingers, got {len(finger_chain_roots)})")
-    print()
+    print(f"Top-level chain roots, in the model's real sibling order: {top_level_chain_roots}")
 
-    # For each finger chain root, walk down first_child to get all 3 frames
-    # in that chain (mcp, pip, dip -- the tip landmark has no rotational
-    # frame of its own, it's a fixed offset skinned to the dip frame).
     finger_frame_chains = []
-    for root_frame in finger_chain_roots:
+    for root_frame in top_level_chain_roots:
         chain = [root_frame]
         f = joint_first_child[root_frame]
-        while f != -1:
-            chain.append(int(f))
+        while is_valid(f):
+            chain.append(f)
             f = joint_first_child[f]
         finger_frame_chains.append(chain)
-        print(f"  chain starting at frame {root_frame}: {chain}")
+        print(f"  chain starting at frame {root_frame}: {chain} (length {len(chain)})")
+
+    # The wrist chain is shorter than the finger chains (2 frames vs 4) --
+    # drop it rather than assuming which index it is.
+    chain_lengths = [len(c) for c in finger_frame_chains]
+    modal_length = max(set(chain_lengths), key=chain_lengths.count)
+    wrist_chains = [c for c in finger_frame_chains if len(c) != modal_length]
+    finger_frame_chains = [c for c in finger_frame_chains if len(c) == modal_length]
+    print()
+    print(f"Treating chain(s) {wrist_chains} as the wrist (length != {modal_length}), "
+          f"keeping {len(finger_frame_chains)} finger chains of length {modal_length}.")
+    print()
+
+    # Geometric hint for which chain is the thumb: the thumb's rest-pose
+    # root position and direction are typically the outlier relative to
+    # the other four fingers (attached further back on the palm, angled
+    # differently), rather than roughly parallel/evenly spaced like
+    # index-middle-ring-pinky.
+    roots = np.array([joint_rest_positions[c[0]] for c in finger_frame_chains])
+    tips = np.array([joint_rest_positions[c[-1]] for c in finger_frame_chains])
+    directions = tips - roots
+    directions = directions / (np.linalg.norm(directions, axis=1, keepdims=True) + 1e-9)
+    mean_dir = directions.mean(axis=0)
+    mean_dir /= np.linalg.norm(mean_dir) + 1e-9
+    angle_from_mean = np.degrees(np.arccos(np.clip(directions @ mean_dir, -1, 1)))
+    print("Per-finger-chain root position and angular deviation from the mean finger "
+          "direction (the outlier -- largest angle -- is very likely the thumb):")
+    for i, chain in enumerate(finger_frame_chains):
+        print(f"  chain {i} (frames {chain}): root_pos={roots[i].round(4).tolist()}, "
+              f"angle_from_mean={angle_from_mean[i]:.1f} deg")
     print()
 
     # Assign each of the 20 landmarks to whichever bone it's MOST skinned
