@@ -51,28 +51,28 @@ expressed. This means:
      world-space landmarks through the crop camera with `world_to_window3`
      (returns pixel x, pixel y, and camera-space depth in one call).
 
-CAVEATS THAT COULD NOT BE VERIFIED WITHOUT THE ACTUAL DATASET
----------------------------------------------------------------
-- Landmark order: `forward_kinematics` returns 20 landmarks
-  (`UMETRACK_TO_CANONICAL_LANDMARK_MAPPING = range(20)`, i.e. the model's
-  own native order -- the toolkit source does not document what that
-  order is beyond "canonical landmark mapping"). This project's convention
-  is 21 keypoints: wrist + 4 joints x 5 fingers (see `_25_to_21` in
-  ArtificialData.py and `palm_length_2d`'s indexing of 0/5/9/17 in
-  RandoData.py). We assume UmeTrack's 20 landmarks are the 4-per-finger x
-  5-finger set (no separate wrist entry, since wrist is already known via
-  `wrist_xform`), and put the wrist translation from `wrist_xform` at
-  index 0. THIS ORDERING IS UNVERIFIED. Before trusting this for real
-  training, generate a handful of crops, draw the resulting `kps` array on
-  top of the crop image (e.g. with RandoData.py's own
-  `geo.draw_hand_rainbow_pts`/`geo.draw_21_hand_lines`, or
-  hand_tracking_toolkit.visualization.visualize_hand_crop_data with
-  pose_type="umetrack"), and eyeball whether fingertips land on
-  fingertips. If the order is wrong, it is very likely a fixed
-  permutation (5 fingers x 4 joints, possibly ordered
-  thumb/index/middle/ring/pinky vs. this project's
-  thumb/index/middle/ring/pinky x [mcp,pip,dip,tip] -- adjust
-  `umetrack_landmarks_to_project_keypoints` below once confirmed).
+RESOLVED CAVEATS
+----------------
+- Landmark order: RESOLVED, no longer a guess. `forward_kinematics` returns
+  20 landmarks in the hand model's own native order, which the toolkit
+  source does not document beyond "canonical landmark mapping" -- but
+  `diagnose_umetrack_landmark_order.py` derives it directly from the
+  downloaded model's actual skeleton (joint_parent/first_child/
+  next_sibling tree + rest-pose geometry), not from images or assumption.
+  Findings, verified against subject_000_separate_hand_000000: the thumb
+  chain is a clear geometric outlier (39.9 degrees off the mean finger
+  direction vs. 4.7-15.4 degrees for the rest); the other four chains fall
+  into a monotonic line matching real index/middle/ring/pinky anatomy.
+  Landmarks 0-4 are the five fingertips (thumb/index/middle/ring/pinky, in
+  that order -- confirmed by each being the farthest landmark from its
+  finger's root when sorted by rest-pose distance); landmarks 5-19 are
+  each finger's remaining mcp/pip/dip, in consecutive blocks of 3, nearest
+  to root first. See `_UMETRACK_LANDMARK_PERMUTATION` below for the exact
+  mapping this produced. If this is ever run against a *different*
+  UmeTrack/HOT3D hand model file, re-run the diagnostic first rather than
+  assuming the same permutation holds -- nothing guarantees every subject's
+  model file uses an identical raw landmark order, only that it's fully
+  derivable the same way.
 - Multiple camera streams: each UmeTrack frame has 2-4 synchronized
   monochrome streams (plus optional RGB). This script only takes the
   first available stream per crop to keep the first version simple; using
@@ -124,14 +124,43 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Landmark order mapping. UNVERIFIED -- see caveats above. This is a
-# best-effort placeholder (identity-ish: wrist, then the 20 UmeTrack
-# landmarks in their native order) so the pipeline is at least plumbed
-# end-to-end; treat the exact permutation as a TODO once real data/images
-# are available to check against.
+# Landmark order mapping. VERIFIED against real downloaded data (subject_000
+# _separate_hand_000000) via diagnose_umetrack_landmark_order.py -- NOT a
+# guess. That script walked the actual skeleton tree (joint_parent /
+# joint_first_child / joint_next_sibling) to find the 5 real finger chains,
+# used rest-pose root-direction angular deviation to identify the thumb
+# unambiguously (39.9 degrees off the mean finger direction, vs 4.7-15.4
+# degrees for the other four -- a clear outlier), and used nearest rest-pose
+# 3D distance to assign each of the 20 canonical landmarks to a finger.
+#
+# The real layout is NOT simple contiguous blocks (thumb=0-3, index=4-7,
+# ...) as originally assumed. It's: landmarks 0-4 are the five fingertips
+# (thumb, index, middle, ring, pinky tip, in that order -- confirmed by
+# each being the farthest landmark from its finger's root in the sort),
+# and landmarks 5-19 are each finger's remaining 3 joints (mcp, pip, dip,
+# nearest-to-root first), grouped in consecutive blocks of 3 in the same
+# finger order:
+#   thumb  = landmarks [mcp=5,  pip=6,  dip=7,  tip=0]
+#   index  = landmarks [mcp=8,  pip=9,  dip=10, tip=1]
+#   middle = landmarks [mcp=11, pip=12, dip=13, tip=2]
+#   ring   = landmarks [mcp=14, pip=15, dip=16, tip=3]
+#   pinky  = landmarks [mcp=17, pip=18, dip=19, tip=4]
 # ---------------------------------------------------------------------------
 NUM_UMETRACK_LANDMARKS = 20
 NUM_PROJECT_KEYPOINTS = 21  # wrist + 4 joints x 5 fingers, per ArtificialData._25_to_21
+
+# Index into the raw 20-landmark array, per project keypoint slot 1-20
+# (slot 0 is the wrist, filled separately from wrist_world_pos). Ordered
+# mcp/pip/dip/tip per finger, fingers in thumb/index/middle/ring/pinky
+# order -- matches this project's universal 21-keypoint convention (same
+# structure ArtificialData._25_to_21 produces for synthetic data).
+_UMETRACK_LANDMARK_PERMUTATION = [
+    5, 6, 7, 0,      # thumb: mcp, pip, dip, tip
+    8, 9, 10, 1,     # index: mcp, pip, dip, tip
+    11, 12, 13, 2,   # middle: mcp, pip, dip, tip
+    14, 15, 16, 3,   # ring: mcp, pip, dip, tip
+    17, 18, 19, 4,   # pinky: mcp, pip, dip, tip
+]
 
 
 def umetrack_landmarks_to_project_keypoints(
@@ -141,13 +170,14 @@ def umetrack_landmarks_to_project_keypoints(
     wrist_world_pos: (3,) wrist translation, from UmeTrackHandPose.wrist_xform
     landmarks_world: (20, 3) output of umetrack_hand_model.forward_kinematics
 
-    Returns (21, 3) in this project's wrist-first joint order.
-    UNVERIFIED mapping -- see module docstring.
+    Returns (21, 3) in this project's wrist-first joint order. See the
+    _UMETRACK_LANDMARK_PERMUTATION comment above for how this was derived
+    and verified.
     """
     assert landmarks_world.shape == (NUM_UMETRACK_LANDMARKS, 3), landmarks_world.shape
     out = np.zeros((NUM_PROJECT_KEYPOINTS, 3), dtype=np.float64)
     out[0] = wrist_world_pos
-    out[1:21] = landmarks_world
+    out[1:21] = landmarks_world[_UMETRACK_LANDMARK_PERMUTATION]
     return out
 
 
