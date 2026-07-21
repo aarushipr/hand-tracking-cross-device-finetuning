@@ -30,7 +30,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequence-dirs", required=True, nargs="+")
     parser.add_argument("--hot3d-repo-root", required=True)
-    parser.add_argument("--min-visibility-ratio", type=float, default=20.0)
+    parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--num-samples", type=int, default=12)
     args = parser.parse_args()

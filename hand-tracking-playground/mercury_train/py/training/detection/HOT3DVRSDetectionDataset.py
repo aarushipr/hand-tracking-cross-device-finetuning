@@ -12,8 +12,13 @@ the hand is occluded by the body, an object, or the headset frame. That was
 the irreducible remaining error after fixing camera-stream selection and
 adding a behind-camera depth guard. The full VRS-based HOT3D dataset ships
 box2d_hands.csv, which is Meta's own ground-truth 2D box per hand per
-camera stream per timestamp, INCLUDING a visibility_ratio[%] field -- i.e.
-already occlusion-aware, no projection math needed at all here.
+camera stream per timestamp, INCLUDING a visibility_ratio field -- i.e.
+already occlusion-aware, no projection math needed at all here. NOTE:
+visibility_ratio is a 0.0-1.0 fraction (fully-visible hands read 1.0), NOT
+a 0-100 percent as an earlier version of this docstring assumed -- that
+mismatch made min_visibility_ratio's old default of 20.0 an unreachable
+threshold that silently dropped every box (see verify_hot3d_vrs_visual.py
+run history). Confirmed via debug_boxes.py against a real sample.
 
 Source of truth for the CSV schema / reader API (Apache 2.0, read not
 vendored -- imported directly from the cloned hot3d repo, same repo already
@@ -40,7 +45,7 @@ Usage:
     ds = HOT3DVRSDetectionDataset(
         sequence_dirs=["/storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0003_c701bd11"],
         hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d/hot3d",
-        min_visibility_ratio=20.0,
+        min_visibility_ratio=0.2,
     )
 """
 import sys
@@ -54,7 +59,7 @@ from a_structs import ImageWithBoundingBoxes, bbox
 
 class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
     def __init__(self, sequence_dirs: list, hot3d_repo_root: str,
-                 min_visibility_ratio: float = 20.0, margin: float = 0.15):
+                 min_visibility_ratio: float = 0.2, margin: float = 0.15):
         # hot3d's data_loaders package uses bare `from data_loaders.X import Y`
         # (relative to hot3d/hot3d), so that directory has to be on sys.path
         # before these imports work -- same pattern as this project's own
@@ -180,7 +185,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequence-dirs", required=True, nargs="+")
     parser.add_argument("--hot3d-repo-root", required=True)
-    parser.add_argument("--min-visibility-ratio", type=float, default=20.0)
+    parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
     args = parser.parse_args()
 
     ds = HOT3DVRSDetectionDataset(
