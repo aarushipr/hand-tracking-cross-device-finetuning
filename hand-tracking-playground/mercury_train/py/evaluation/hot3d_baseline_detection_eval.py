@@ -79,6 +79,13 @@ sys.path.insert(0, os.path.join(_THIS_DIR, "../../"))  # mercury_train root, for
 DETECTION_MODEL_FILENAME = "grayscale_detection_160x160.onnx"
 DETECTION_INPUT_SIZE = 160
 
+# Both confirmed from hg_model.cpp / hg_sync.cpp, not guessed:
+# - hg_sync.cpp: DEBUG_GET_ONCE_FLOAT_OPTION(mercury_min_detection_confidence,
+#   "MERCURY_MIN_DETECTION_CONFIDENCE", 0.3) -- default is 0.3, NOT 0.5.
+# - hg_model.cpp run_hand_detection_unsafe(): output.found = hand_exists[i] >
+#   min_detection_confidence.val -- strict greater-than, not >=.
+MIN_DETECTION_CONFIDENCE = 0.3
+
 # Confirmed via participant-overlap check against the actual downloaded
 # manifests (Hot3DAria_download_urls.json / Hot3DQuest_download_urls.json),
 # not the HOT3D repo's own docs alone -- see FOUR_WEEK_SUBMISSION_PLAN.md.
@@ -375,13 +382,26 @@ def main():
         # differently.
         for slot in (0, 1):
             exists = float(np.asarray(pred["hand_exists"]).reshape(-1)[slot])
-            cx_160 = float(np.asarray(pred["cx"]).reshape(-1)[slot])
-            cy_160 = float(np.asarray(pred["cy"]).reshape(-1)[slot])
-            size_160 = float(np.asarray(pred["size"]).reshape(-1)[slot])
+            cx_raw = float(np.asarray(pred["cx"]).reshape(-1)[slot])
+            cy_raw = float(np.asarray(pred["cy"]).reshape(-1)[slot])
+            size_raw = float(np.asarray(pred["size"]).reshape(-1)[slot])
+
+            # Raw cx/cy/size are NOT pixel coordinates -- confirmed via
+            # hg_model.cpp run_hand_detection_unsafe():
+            #   _pt.x = math_map_ranges(cx[i], -1, 1, 0, kDetectionInputSize)
+            #   size *= kDetectionInputSize * 2.0f; size *= ||go_back row0||
+            # i.e. cx/cy are normalized to [-1, 1] over the 160x160 letterboxed
+            # frame, and size is a normalized fraction scaled by 2x the input
+            # size before being converted to original-image pixels via the
+            # inverse letterbox scale. Earlier version of this script treated
+            # all three as already being 160-space pixels -- that produced
+            # 0.0000 mean IoU, silently wrong, not a crash.
+            cx_160 = (cx_raw + 1.0) / 2.0 * DETECTION_INPUT_SIZE
+            cy_160 = (cy_raw + 1.0) / 2.0 * DETECTION_INPUT_SIZE
 
             orig_pt = inv @ np.array([cx_160, cy_160, 1.0])
             pred_cx, pred_cy = float(orig_pt[0]), float(orig_pt[1])
-            pred_size = size_160 * scale_recovered
+            pred_size = size_raw * DETECTION_INPUT_SIZE * 2.0 * scale_recovered
             pred_box = (pred_cx - pred_size / 2, pred_cy - pred_size / 2,
                         pred_cx + pred_size / 2, pred_cy + pred_size / 2)
 
@@ -413,7 +433,7 @@ def main():
     ious = [r["iou"] for r in rows if r["iou"] is not None]
     if ious:
         print(f"Mean IoU (GT-present hands only): {np.mean(ious):.4f}  (n={len(ious)})")
-    exist_correct = [r["pred_exists"] >= 0.5 for r in rows]
+    exist_correct = [r["pred_exists"] > MIN_DETECTION_CONFIDENCE for r in rows]
     gt_present = [r["gt_exists"] for r in rows]
     if rows:
         acc = np.mean([p == g for p, g in zip(exist_correct, gt_present)])
