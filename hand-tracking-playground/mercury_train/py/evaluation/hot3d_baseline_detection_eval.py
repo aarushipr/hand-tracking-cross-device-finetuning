@@ -25,9 +25,12 @@ good is what already ships today," which is the number the improved model
    SLAM cameras: default is 270, verified by dumping the actual 160x160
    letterboxed crop at all four rotation values for a real frame and
    visually checking which one shows an upright hand/scene (see
-   git history / thesis notes for the four sample crops). Quest's cameras
-   have NOT been checked the same way yet -- don't assume 270 carries over,
-   re-run the same visual check before trusting Quest-based numbers.
+   git history / thesis notes for the four sample crops). Also confirmed
+   independently for BOTH Aria SLAM cameras -- camera-slam-left and
+   camera-slam-right were checked separately and both are correct at 270,
+   so this is not a per-camera-mount difference. Quest's cameras have NOT
+   been checked the same way yet -- don't assume 270 carries over, re-run
+   the same visual check before trusting Quest-based numbers.
    Even with the correct rotation, initial small-sample runs still showed
    low model confidence and oversized predicted boxes -- see the `size`
    decode math below and re-verify it before trusting IoU at scale.
@@ -182,7 +185,7 @@ def normalize_grayscale(img_uint8):
 # ---------------------------------------------------------------------------
 
 class Hot3dRawFrameSource:
-    def __init__(self, sequence_dirs, hot3d_repo_root, min_visibility_ratio=0.2):
+    def __init__(self, sequence_dirs, hot3d_repo_root, min_visibility_ratio=0.2, max_samples_per_sequence=None):
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
@@ -212,12 +215,23 @@ class Hot3dRawFrameSource:
 
             aria_provider = AriaDataProvider(paths.vrs_filepath, mps_folder_path=None)
 
+            seq_samples = []
             for stream_id in aria_provider.get_image_stream_ids():
                 if str(stream_id).startswith("214-"):  # RGB stream, skip -- mono-only model
                     continue
                 timestamps = aria_provider.get_sequence_timestamps(stream_id, TimeDomain.TIME_CODE)
                 for ts in timestamps:
-                    self.samples.append((seq_name, aria_provider, box2d_provider, stream_id, ts))
+                    seq_samples.append((seq_name, aria_provider, box2d_provider, stream_id, ts))
+
+            if max_samples_per_sequence is not None and len(seq_samples) > max_samples_per_sequence:
+                # Stride evenly across the whole sequence instead of taking the
+                # first N -- consecutive frames are near-duplicates, so only
+                # taking the start would badly under-represent each sequence's
+                # actual variety (motion, lighting, hand pose/position).
+                idxs = np.linspace(0, len(seq_samples) - 1, max_samples_per_sequence, dtype=int)
+                seq_samples = [seq_samples[i] for i in idxs]
+
+            self.samples.extend(seq_samples)
 
     def __len__(self):
         return len(self.samples)
@@ -349,6 +363,9 @@ def main():
                               "sense to a human viewer. See module docstring for the verification method.")
     parser.add_argument("--output", required=True, help="CSV path for per-sample results")
     parser.add_argument("--limit", type=int, default=None, help="cap total samples evaluated, for a quick smoke test")
+    parser.add_argument("--max-samples-per-sequence", type=int, default=None,
+                         help="cap samples taken from EACH sequence (strided evenly across it), so a run spans many "
+                              "different sequences/participants instead of exhausting --limit on just the first one")
     args = parser.parse_args()
 
     if args.sequence_dirs:
@@ -364,7 +381,8 @@ def main():
     else:
         parser.error("must pass either --sequence-dirs or --dataset-root")
 
-    source = Hot3dRawFrameSource(seq_dirs, args.hot3d_repo_root, args.min_visibility_ratio)
+    source = Hot3dRawFrameSource(seq_dirs, args.hot3d_repo_root, args.min_visibility_ratio,
+                                  max_samples_per_sequence=args.max_samples_per_sequence)
     print(f"{len(source)} (frame, camera-stream) samples across {len(seq_dirs)} sequences")
 
     session = load_detection_session(args.models_dir)
