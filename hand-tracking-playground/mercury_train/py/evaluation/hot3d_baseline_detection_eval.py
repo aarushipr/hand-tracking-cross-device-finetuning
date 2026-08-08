@@ -21,13 +21,16 @@ good is what already ships today," which is the number the improved model
 
 1. `blackbar_letterbox()` -- ports `blackbar()` (hg_model.cpp lines ~24-100):
    scale-to-fit + center-pad (letterbox) into a square, with a camera-mount
-   ROTATION applied via `orientation`. THIS ROTATION IS NOT VERIFIED for
-   HOT3D's Aria/Quest SLAM cameras -- Monado's driver reads it from live
-   camera calibration, which HOT3D recordings don't expose the same way.
-   Defaults to 0 (no rotation). If detection boxes look systematically
-   off/rotated relative to `box2d_hands.csv` when you visualize a few
-   samples (same pattern as `verify_hot3d_vrs_visual.py`), try 90/180/270
-   before trusting the metrics -- do not skip this check.
+   ROTATION applied via `orientation`. CONFIRMED 2026-08-08 for HOT3D Aria
+   SLAM cameras: default is 270, verified by dumping the actual 160x160
+   letterboxed crop at all four rotation values for a real frame and
+   visually checking which one shows an upright hand/scene (see
+   git history / thesis notes for the four sample crops). Quest's cameras
+   have NOT been checked the same way yet -- don't assume 270 carries over,
+   re-run the same visual check before trusting Quest-based numbers.
+   Even with the correct rotation, initial small-sample runs still showed
+   low model confidence and oversized predicted boxes -- see the `size`
+   decode math below and re-verify it before trusting IoU at scale.
 
 2. `normalize_grayscale()` -- ports `normalizeGrayscaleImage()` (hg_model.cpp
    lines ~234-255): NOT simple /255 or ImageNet mean/std. It's a two-pass
@@ -339,8 +342,11 @@ def main():
     parser.add_argument("--models-dir", required=True,
                          help="folder containing grayscale_detection_160x160.onnx")
     parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
-    parser.add_argument("--orientation", type=int, choices=[0, 90, 180, 270], default=0,
-                         help="camera mount rotation for blackbar letterboxing -- UNVERIFIED default, see module docstring")
+    parser.add_argument("--orientation", type=int, choices=[0, 90, 180, 270], default=270,
+                         help="camera mount rotation for blackbar letterboxing -- confirmed 2026-08-08 by visually "
+                              "inspecting the letterboxed crop at all 4 rotations against a real HOT3D Aria frame; "
+                              "270 was the only one where the hand appeared upright and the scene orientation made "
+                              "sense to a human viewer. See module docstring for the verification method.")
     parser.add_argument("--output", required=True, help="CSV path for per-sample results")
     parser.add_argument("--limit", type=int, default=None, help="cap total samples evaluated, for a quick smoke test")
     args = parser.parse_args()
