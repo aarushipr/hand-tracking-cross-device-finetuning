@@ -307,6 +307,9 @@ def load_detection_session(models_dir):
     return ort.InferenceSession(path)
 
 
+_debug_print_count = [0]  # caps the side-by-side pred-vs-GT debug prints in main()
+
+
 def run_detection(session, letterboxed_float, _printed_shapes=[False]):
     inp = letterboxed_float.reshape(1, 1, DETECTION_INPUT_SIZE, DETECTION_INPUT_SIZE).astype(np.float32)
     outputs = session.run(["hand_exists", "cx", "cy", "size"], {"inputImg": inp})
@@ -419,6 +422,17 @@ def main():
                 row["iou"] = box_iou(pred_box, gt_box)
                 gt_cx, gt_cy = (gt["left"] + gt["right"]) / 2, (gt["top"] + gt["bottom"]) / 2
                 row["center_error_px"] = float(np.hypot(pred_cx - gt_cx, pred_cy - gt_cy))
+
+                # DEBUG: side-by-side comparison for the first few GT-present
+                # samples, to diagnose the orientation/scale issue numerically
+                # instead of guessing. Remove once IoU is confirmed sane.
+                if _debug_print_count[0] < 5:
+                    _debug_print_count[0] += 1
+                    print(f"DEBUG sample: image shape (h,w)={image.shape}, orientation={args.orientation}")
+                    print(f"  PRED center=({pred_cx:.1f}, {pred_cy:.1f}) size={pred_size:.1f}")
+                    print(f"  GT   center=({gt_cx:.1f}, {gt_cy:.1f}) box=(l={gt['left']:.1f}, t={gt['top']:.1f}, "
+                          f"r={gt['right']:.1f}, b={gt['bottom']:.1f})")
+                    print(f"  IoU={row['iou']:.4f}")
             rows.append(row)
 
         if idx % 500 == 0:
