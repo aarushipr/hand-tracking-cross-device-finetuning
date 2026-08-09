@@ -91,8 +91,8 @@ class DetNet(nn.Module):
 
         # out.append(nn.Linear(3200, 256)) # 320x240
         # out.append(nn.Linear(2560, 256)) # 224x224
-        # out.append(nn.Linear(1440, 256)) # 160x160
-        out.append(nn.Linear(960, 256)) # 160x120
+        out.append(nn.Linear(1440, 256)) # 160x160
+        # out.append(nn.Linear(960, 256)) # 160x120
         if dropout:
             out.append(nn.Dropout(0.1, inplace=True))
         if batchnorm:

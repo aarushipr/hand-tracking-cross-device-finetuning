@@ -360,7 +360,14 @@ def main():
                          help="camera mount rotation for blackbar letterboxing -- confirmed 2026-08-08 by visually "
                               "inspecting the letterboxed crop at all 4 rotations against a real HOT3D Aria frame; "
                               "270 was the only one where the hand appeared upright and the scene orientation made "
-                              "sense to a human viewer. See module docstring for the verification method.")
+                              "sense to a human viewer. This value is CONFIRMED FOR ARIA ONLY -- see module "
+                              "docstring and dump_orientation_check.py before trusting it for Quest.")
+    parser.add_argument("--device", required=True, choices=["Aria", "Quest"],
+                         help="which physical device these --sequence-dirs/--dataset-root sequences were captured "
+                              "on. Required (not inferred) so results are never silently mislabeled -- an earlier "
+                              "version of this script guessed device from --hot3d-repo-root's path string via a "
+                              "broken `or True` condition that always evaluated to 'Aria' regardless of the actual "
+                              "data; this argument replaces that.")
     parser.add_argument("--output", required=True, help="CSV path for per-sample results")
     parser.add_argument("--limit", type=int, default=None, help="cap total samples evaluated, for a quick smoke test")
     parser.add_argument("--max-samples-per-sequence", type=int, default=None,
@@ -380,6 +387,15 @@ def main():
               f"(excludes no-GT test participants {sorted(NO_GT_TEST_PARTICIPANTS)})")
     else:
         parser.error("must pass either --sequence-dirs or --dataset-root")
+
+    if args.device == "Quest" and args.orientation == 270:
+        print("WARNING: --device Quest with --orientation left at its default (270). That value was "
+              "confirmed by visual inspection for Aria's SLAM cameras ONLY -- it has NOT been checked "
+              "for Quest and may well be wrong (different physical camera mount). Run "
+              "dump_orientation_check.py against a real Quest frame first, pick the orientation where "
+              "the hand looks upright and the GT box lands on it, and pass that explicitly with "
+              "--orientation. Proceeding anyway, but treat any IoU/error numbers from this run as "
+              "unverified until that check is done.")
 
     source = Hot3dRawFrameSource(seq_dirs, args.hot3d_repo_root, args.min_visibility_ratio,
                                   max_samples_per_sequence=args.max_samples_per_sequence)
@@ -435,7 +451,7 @@ def main():
             gt = next((g for g in gt_boxes if g["slot"] == slot), None)
             row = {
                 "sequence": seq_name, "stream_id": stream_id, "timestamp_ns": ts, "hand_slot": slot,
-                "device": "Aria" if "aria" in args.hot3d_repo_root.lower() or True else "unknown",
+                "device": args.device,
                 "pred_exists": exists, "pred_cx": pred_cx, "pred_cy": pred_cy, "pred_size": pred_size,
                 "gt_exists": gt is not None,
                 "visibility_ratio": gt["visibility_ratio"] if gt else None,

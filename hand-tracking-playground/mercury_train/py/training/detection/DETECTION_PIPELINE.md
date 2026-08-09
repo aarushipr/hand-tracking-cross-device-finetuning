@@ -18,7 +18,7 @@ This is a two-stage pipeline: **detect → crop → estimate**. This document co
 | `HMDHandRectsDataset.py` | Loads egocentric XR hand bounding-box sequences |
 | `EpicKitchensDataset.py` | Loads Epic Kitchens GoPro hand bounding-box data |
 | `DarknetDataset.py` | Loads EgoHands in darknet annotation format |
-| `header.py` | Model input dimensions (`160×120`) |
+| `header.py` | Model input dimensions (`160×160`) |
 | `local_config.py` | Disk paths to datasets |
 
 ---
@@ -95,17 +95,19 @@ Weights control how often each dataset appears during training relative to the o
 DetNet is a compact MobileNetV2-style convolutional network. It takes a grayscale image and directly regresses four bounding-box values per hand.
 
 ### Input
-A single `160×120` grayscale image: `[B, 1, 160, 120]`
+A single `160×160` grayscale image: `[B, 1, 160, 160]` — matches Monado's shipped
+production baseline (`grayscale_detection_160x160.onnx`) exactly, which is what
+makes literal ONNX→PyTorch weight loading possible (see `load_monado_weights.py`).
 
 ### Architecture
 
 ```
-input [B, 1, 160, 120]
+input [B, 1, 160, 160]
         ↓ backbone (Conv2d + 12 InvertedResidual blocks)
         → feature map [B, 160, ...]
         ↓ Flatten
-        → [B, 960]
-        ↓ FC layers: 960 → 256 → 8 → 8
+        → [B, 1440]
+        ↓ FC layers: 1440 → 256 → 8 → 8
         ↓ split across second dimension:
         ├── exists     = sigmoid(x[:, 0:2])   [B, 2]  — left/right hand confidence
         ├── center_x   = x[:, 2:4]            [B, 2]  — horizontal center
@@ -195,5 +197,6 @@ The trainer reads `SLURM_CPUS_PER_TASK` automatically. The detection pipeline ha
 ## What's Missing / Future Work
 
 - **Test set**: HOT3D needs to be downloaded and wired in at the `# test_dataloader` placeholder. This gives a true cross-device generalisation number on hardware different from training.
-- **FC layer architecture**: The large linear layers (960→256) are noted in `DetNet.py` as a candidate for replacement with a convolutional head. If training is slow or the model overfits, this is the first thing to try.
+- **FC layer architecture**: The large linear layers (1440→256) are noted in `DetNet.py` as a candidate for replacement with a convolutional head. If training is slow or the model overfits, this is the first thing to try.
+- **Weight initialization**: `load_monado_weights.py` loads Monado's shipped `grayscale_detection_160x160.onnx` weights into this module (verified against the ONNX model to ~1e-7). `trainer_detection.py` still initializes from scratch (`init_weights()`) — wiring in `load_monado_weights.py` before training is what turns this into literal fine-tuning rather than training from scratch.
 - **No visualizer**: The detection pipeline doesn't have an equivalent of the keypoint visualizer. Adding wandb image logging (drawing predicted boxes on the input image) would make it easier to see whether the model is finding hands correctly, not just what its loss number is.
