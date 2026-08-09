@@ -28,9 +28,12 @@ good is what already ships today," which is the number the improved model
    git history / thesis notes for the four sample crops). Also confirmed
    independently for BOTH Aria SLAM cameras -- camera-slam-left and
    camera-slam-right were checked separately and both are correct at 270,
-   so this is not a per-camera-mount difference. Quest's cameras have NOT
-   been checked the same way yet -- don't assume 270 carries over, re-run
-   the same visual check before trusting Quest-based numbers.
+   so this is not a per-camera-mount difference.
+   CONFIRMED 2026-08-09 for Quest 3 as well, using the same method
+   (dump_orientation_check.py, run against P0013_0ec32d10) -- 270 is also
+   correct for Quest's SLAM cameras. Getting Quest readable at all first
+   required a separate fix (see py/training/common/hot3d_timecode_compat.py
+   -- Quest recordings have no TimeCode reference, unlike Aria).
    Even with the correct rotation, initial small-sample runs still showed
    low model confidence and oversized predicted boxes -- see the `size`
    decode math below and re-verify it before trusting IoU at scale.
@@ -372,11 +375,9 @@ def main():
                          help="folder containing grayscale_detection_160x160.onnx")
     parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
     parser.add_argument("--orientation", type=int, choices=[0, 90, 180, 270], default=270,
-                         help="camera mount rotation for blackbar letterboxing -- confirmed 2026-08-08 by visually "
-                              "inspecting the letterboxed crop at all 4 rotations against a real HOT3D Aria frame; "
-                              "270 was the only one where the hand appeared upright and the scene orientation made "
-                              "sense to a human viewer. This value is CONFIRMED FOR ARIA ONLY -- see module "
-                              "docstring and dump_orientation_check.py before trusting it for Quest.")
+                         help="camera mount rotation for blackbar letterboxing -- 270 confirmed for both Aria "
+                              "(2026-08-08) and Quest (2026-08-09) SLAM cameras by visually inspecting the "
+                              "letterboxed crop at all 4 rotations against real frames. See module docstring.")
     parser.add_argument("--device", required=True, choices=["Aria", "Quest"],
                          help="which physical device these --sequence-dirs/--dataset-root sequences were captured "
                               "on. Required (not inferred) so results are never silently mislabeled -- an earlier "
@@ -402,15 +403,6 @@ def main():
               f"(excludes no-GT test participants {sorted(NO_GT_TEST_PARTICIPANTS)})")
     else:
         parser.error("must pass either --sequence-dirs or --dataset-root")
-
-    if args.device == "Quest" and args.orientation == 270:
-        print("WARNING: --device Quest with --orientation left at its default (270). That value was "
-              "confirmed by visual inspection for Aria's SLAM cameras ONLY -- it has NOT been checked "
-              "for Quest and may well be wrong (different physical camera mount). Run "
-              "dump_orientation_check.py against a real Quest frame first, pick the orientation where "
-              "the hand looks upright and the GT box lands on it, and pass that explicitly with "
-              "--orientation. Proceeding anyway, but treat any IoU/error numbers from this run as "
-              "unverified until that check is done.")
 
     source = Hot3dRawFrameSource(seq_dirs, args.hot3d_repo_root, args.min_visibility_ratio,
                                   max_samples_per_sequence=args.max_samples_per_sequence)
