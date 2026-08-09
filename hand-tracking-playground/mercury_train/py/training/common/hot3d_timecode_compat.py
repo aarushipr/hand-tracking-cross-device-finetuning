@@ -45,9 +45,26 @@ WHY THE FIX BELOW IS SAFE, NOT JUST A WORKAROUND
 
 So: fall back to DEVICE_TIME when TIME_CODE isn't available, and keep
 passing TimeDomain.TIME_CODE downstream to get_bbox_at_timestamp as
-before -- don't change that call site. This module only patches the one
-place that actually needs different real behavior (AriaDataProvider's
-internal timestamp query), not the box2d lookup, which needs no change.
+before -- don't change that call site. This module patches the two
+places that actually need different real behavior:
+
+- AriaDataProvider.get_sequence_timestamps (used internally by __init__
+  to precompute the per-stream timestamp list)
+- AriaDataProvider.get_image (used per-sample to actually fetch pixel
+  data) -- unlike get_sequence_timestamps, this one hardcodes
+  TimeDomain.TIME_CODE directly into the call to
+  vrs_data_provider.get_image_data_by_time_ns with no parameter to
+  override it, so there's no way to influence it from the caller side;
+  it has to be patched. Confirmed this is a REAL domain-aware lookup, not
+  a decorative check like HandBox2dDataProvider's guard -- it raises
+  RuntimeError rather than silently returning a mismatched frame if given
+  the wrong domain, so the fallback path here is a genuine correct-domain
+  retry (the timestamp really is DEVICE_TIME for Quest, from the
+  get_sequence_timestamps fallback above), not another "satisfy the
+  label" trick.
+
+The box2d lookup (get_bbox_at_timestamp) needs no patch at all -- see
+point 2 above.
 
 WHAT THIS DOES NOT COVER
 -------------------------
@@ -104,3 +121,28 @@ def patch():
             raise
 
     AriaDataProvider.get_sequence_timestamps = get_sequence_timestamps_with_device_time_fallback
+
+    from projectaria_tools.core.sensor_data import TimeQueryOptions
+
+    def get_image_with_device_time_fallback(self, timestamp_ns, stream_id):
+        try:
+            image = self._vrs_data_provider.get_image_data_by_time_ns(
+                stream_id, timestamp_ns, TimeDomain.TIME_CODE, TimeQueryOptions.CLOSEST,
+            )
+        except RuntimeError as e:
+            if "TimeCode" in str(e):
+                print(
+                    f"[hot3d_timecode_compat] stream {stream_id} image lookup has no "
+                    f"TimeCode reference (expected for Quest) -- retrying with "
+                    f"DEVICE_TIME. See this module's docstring for why that's the "
+                    f"correct domain here, not just a fallback.",
+                    file=sys.stderr,
+                )
+                image = self._vrs_data_provider.get_image_data_by_time_ns(
+                    stream_id, timestamp_ns, TimeDomain.DEVICE_TIME, TimeQueryOptions.CLOSEST,
+                )
+            else:
+                raise
+        return image[0].to_numpy_array() if image is not None else None
+
+    AriaDataProvider.get_image = get_image_with_device_time_fallback
