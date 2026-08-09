@@ -68,6 +68,21 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
+        # Quest 3 HOT3D recordings have no TimeCode reference -- see
+        # py/training/common/hot3d_timecode_compat.py's docstring for the
+        # full investigation (verified 2026-08-09 against real Quest
+        # sequences) and why falling back to DEVICE_TIME here is safe
+        # rather than just quieting the crash. No effect on Aria sequences.
+        # Defensive sys.path insert: this class is usually imported from a
+        # caller that already put mercury_train root on sys.path (e.g.
+        # trainer_detection.py's __main__), but don't assume that here.
+        import os as _os
+        _mercury_train_root = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../../../')
+        if _mercury_train_root not in sys.path:
+            sys.path.insert(0, _mercury_train_root)
+        from py.training.common.hot3d_timecode_compat import patch as _patch_quest_timecode
+        _patch_quest_timecode()
+
         from data_loaders.PathProvider import Hot3dDataPathProvider
         from data_loaders.HandBox2dDataProvider import load_box2d_trajectory_from_csv
         from data_loaders.AriaDataProvider import AriaDataProvider

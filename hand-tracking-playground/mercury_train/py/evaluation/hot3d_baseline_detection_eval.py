@@ -189,6 +189,21 @@ class Hot3dRawFrameSource:
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
+        # Quest 3 HOT3D recordings have no TimeCode reference -- verified
+        # 2026-08-09 against real Quest sequences (P0013_0ec32d10,
+        # P0013_3f269bab), both raise "Timedomain TimeCode not supported"
+        # from AriaDataProvider.__init__ otherwise. See
+        # hot3d_timecode_compat.py's docstring for why the fallback to
+        # DEVICE_TIME is safe (not just a silencer): box2d_hands.csv's
+        # timestamps are themselves DEVICE_TIME-domain for Quest, confirmed
+        # by exact nanosecond match against a real VRS reading, and
+        # HandBox2dDataProvider.get_bbox_at_timestamp's time_domain
+        # parameter is unused beyond its guard clause. Must patch AFTER
+        # hot3d_repo_root is on sys.path (this import needs `data_loaders`
+        # importable) and BEFORE any AriaDataProvider is constructed.
+        from py.training.common.hot3d_timecode_compat import patch as _patch_quest_timecode
+        _patch_quest_timecode()
+
         from data_loaders.PathProvider import Hot3dDataPathProvider
         from data_loaders.HandBox2dDataProvider import load_box2d_trajectory_from_csv
         from data_loaders.AriaDataProvider import AriaDataProvider
