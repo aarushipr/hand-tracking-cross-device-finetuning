@@ -3,10 +3,6 @@ import sys
 import shutil
 import multiprocessing
 
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../'))
-    from common import visualize_directreg
-
 import header
 
 import torch
@@ -16,8 +12,9 @@ from torch.utils.data import DataLoader
 import DetNet
 import py.training.common.a_geometry as geo
 
-from CombinedDataset import CombinedDataset
-from py.training.detection.HMDHandRectsDataset import HMDHandRectsDataset
+from py.training.detection.HOT3DVRSDetectionDataset import HOT3DVRSDetectionDataset
+from py.training.common.hot3d_split import list_sequence_dirs, split_train_val
+from py.training.detection.load_weights import load_detnet_weights
 import py.training.detection.local_config as local_config
 from py.training.common.a_geometry import *
 import wandb
@@ -87,9 +84,17 @@ def validate_epoch(device, val_dataloader, loss_fn, model):
 
             total_loss += (loss_exists + loss_center_x + loss_center_y + loss_size).item()
 
-    model.train()
+    set_train_mode(model)
     return total_loss / len(val_dataloader)
 
+def set_train_mode(model):
+    # model.train() flips every submodule to train mode, including the frozen
+    # backbone. But the backbone's BatchNorm layers must stay in eval mode --
+    # their running stats were reset by load_detnet_weights to represent a
+    # neutral/identity transform, and would drift away from that if allowed
+    # to update during training.
+    model.train()
+    model.module.backbone.eval()
 
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -106,53 +111,50 @@ def main():
     num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", multiprocessing.cpu_count()))
 
     batch_size = 64
+    
+    train_pool_dirs = list_sequence_dirs(local_config.hot3d_dataset_root, "train")
+    
+    if not train_pool_dirs:
+        raise RuntimeError(
+            "[trainer_detection] No HOT3D train sequences found at "
+            "local_config.hot3d_dataset_root — nothing to train on.")
+    train_seq_dirs, val_seq_dirs = split_train_val(train_pool_dirs)
 
-    # Training: subject00 + subject01, EgoHands, EpicKitchens.
-    # subject02 is excluded from CombinedDataset — held out for validation.
+    train_dataset = HOT3DVRSDetectionDataset(
+        sequence_dirs=train_seq_dirs,
+        hot3d_repo_root=local_config.hot3d_repo_root)
     train_dataloader = DataLoader(
-        CombinedDataset(),
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers)
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
-    # Validation (run every epoch): subject02 sequences — same device as
-    # training data but a different subject not seen during training.
-    # HMDHandRects has no public source (internal capture) — this is
-    # unconfigured on a fresh checkout/cluster until it's located, so this
-    # is checked and skipped gracefully rather than crashing, same pattern
-    # as CombinedDataset.py's training sources.
-    val_seq_roots = [
-        f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence00",
-        f"{local_config.hmdhandrects_location}/sequences/train_subject02_sequence01",
-    ]
-    val_seq_roots = [
-        r for r in val_seq_roots
-        if os.path.exists(os.path.join(r, HMDHandRectsDataset.ann))
-    ]
 
     val_dataloader = None
-    if val_seq_roots:
-        val_dataset = torch.utils.data.ConcatDataset(
-            [HMDHandRectsDataset(r) for r in val_seq_roots])
+    if val_seq_dirs:
+        val_dataset = HOT3DVRSDetectionDataset(
+            sequence_dirs=val_seq_dirs,
+            hot3d_repo_root=local_config.hot3d_repo_root)
         val_dataloader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers)
+            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     else:
-        print("[trainer_detection] Skipping validation — HMDHandRects subject02 "
-              "not found at local_config.hmdhandrects_location. Training will "
-              "still run and checkpoint, but with no validation-loss tracking "
-              "or 'best model' selection until this is located.")
-
+        print("[trainer_detection] Too few HOT3D train-pool sequences to carve out "
+            "a validation split — training will proceed with no validation-loss "
+            "tracking until more sequences are available.")
     # Test (run once after training): no held-out test dataset yet.
     # Replace with HOT3D once obtained — that represents true cross-device
     # generalisation from the HMD capture setup to a different XR device.
     # test_dataloader = DataLoader(HOT3DDataset(...), ...)
 
     model = DetNet.DetNet()
+    load_detnet_weights(model)
+    
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+        
     model = torch.nn.DataParallel(model).to(device)
-    optimizer = torch.optim.Adam(model.module.parameters())
+    model.module.backbone.eval()
+    
+    trainable_params = (p for p in model.module.parameters() if p.requires_grad)
+    optimizer = torch.optim.Adam(trainable_params)
+    
     loss_fn = nn.MSELoss(reduction="mean").to(device)
 
     start_epoch = 0
@@ -175,7 +177,7 @@ def main():
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
 
-        model.train()
+        set_train_mode(model)
         length = len(train_dataloader)
         for idx, batch in enumerate(train_dataloader):
             print(f"Training {idx}/{length}")
