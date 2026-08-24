@@ -81,9 +81,30 @@ def load_conv_bn(conv, bn, w_init, b_init):
    
         
 if __name__ == "__main__":
+    import numpy as np
+
     model = KeyNet.KeyNet()
+    model.eval()
     print("BEFORE image:", model.image_network[8].conv[6].weight[0, 0, :5])
     print("BEFORE fused:", model.fused_network[11].conv[3].weight[0, 0, :5])
     load_keynet_weights(model)
     print("AFTER image:", model.image_network[8].conv[6].weight[0, 0, :5])
     print("AFTER fused:", model.fused_network[11].conv[3].weight[0, 0, :5])
+
+    try:
+        import onnxruntime as ort
+        sess = ort.InferenceSession(ONNX_PATH, providers=["CPUExecutionProvider"])
+        torch.manual_seed(0)
+        x = torch.randn(1, 1, 128, 128)
+        kp = torch.randn(1, 42)
+        valid = torch.ones(1)
+        with torch.no_grad():
+            xy_t, depth_t, extras_t, curls_t = model(x, kp, valid)
+        xy_o, depth_o, extras_o, curls_o = sess.run(
+            None, {"inputImg": x.numpy(), "lastKeypoints": kp.numpy(),
+                   "useLastKeypoints": valid.numpy()})
+        for name, t, o in [("heatmap_xy", xy_t, xy_o), ("heatmap_depth", depth_t, depth_o),
+                            ("scalar_extras", extras_t, extras_o), ("curls", curls_t, curls_o)]:
+            print(f"{name} max abs diff vs ONNX: {np.max(np.abs(t.numpy() - o)):.2e}")
+    except ImportError:
+        print("(onnxruntime not installed -- skipping numerical cross-check)")
