@@ -195,6 +195,7 @@ def main():
 
     # Training: HOT3D only
     hot3d_train_dirs = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
+    hot3d_train_dirs = hot3d_train_dirs[:3]
     dataloader_train = DataLoader(
         HOT3DKeypointDataset(
             sequence_dirs=hot3d_train_dirs,
