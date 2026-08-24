@@ -184,11 +184,15 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                             T_world_device, hand_pose_data,
                             stream_id, ts,
                         ))
+            
+        self.actual_size = len(self.samples)
+        self.num_times_to_repeat = 1
 
     def __len__(self):
-        return len(self.samples)
+        return self.actual_size * self.num_times_to_repeat
 
     def __getitem__(self, idx):
+        idx = idx % self.actual_size
         (device_data_provider, umetrack_provider, T_device_camera,
          camera_calibration, T_world_device, hand_pose_data,
          stream_id, ts) = self.samples[idx]
