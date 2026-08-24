@@ -7,7 +7,8 @@ if __name__ == "__main__":
 
 import local_config
 
-import CombinedDataset
+import py.training.common.hot3d_split as hot3d_split
+from HOT3DKeypointDataset import HOT3DKeypointDataset
 from RandoData import RandoDataset
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ import wandb
 import visualizer
 import validatoor
 import multiprocessing
+from load_weights import load_keynet_weights
 
 
 # https://gitanswer.com/pytorch-too-many-open-files-error-cplusplus-356516297
@@ -159,7 +161,11 @@ def train_loop(device, dataloader, model, optimizer):
         f"Avg loss this epoch: {avg_loss}")
     return avg_loss
 
-
+def set_train_mode(model):
+    model.train()
+    model.module.image_network.eval()
+    
+    
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     num_devices = 1
@@ -187,10 +193,14 @@ def main():
 
     batch_size = batch_size_per_device * num_devices
 
-    # Training: synthetic + panoptic + nikitha. freihand and tom are excluded
-    # from CombinedDataset — they are held out for evaluation only.
+    # Training: HOT3D only
+    hot3d_train_dirs = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
     dataloader_train = DataLoader(
-        CombinedDataset.AllOfTheDatasetsCombined(),
+        HOT3DKeypointDataset(
+            sequence_dirs=hot3d_train_dirs,
+            hot3d_repo_root=local_config.hot3d_repo_root,
+            object_library_path=local_config.hot3d_object_library_path,
+        ),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -236,16 +246,25 @@ def main():
             print(f"[kpest_trainer] Skipping test set — tom.csv not found at {tom_csv_path}")
 
     model = KeyNet.KeyNet()
+    load_keynet_weights(model)
+    
+    for param in model.image_network.parameters():
+        param.requires_grad = False
+    
     model = torch.nn.DataParallel(model).to(device)
-    optimizer = torch.optim.AdamW(model.module.parameters())
+    model.module.image_network.eval()
+    
+    
+    trainable_params = (p for p in model.module.parameters() if p.requires_grad)
+    optimizer = torch.optim.AdamW(trainable_params)
+
+    start_epoch = 0
+    best_validation_loss = float('inf')
 
     # Use an absolute path so checkpoints are always written to the same place
     # regardless of what directory SLURM starts the job from.
     checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
-
-    start_epoch = 0
-    best_validation_loss = float('inf')
 
     if os.path.exists(checkpoint_file):
         checkpoint = torch.load(checkpoint_file, map_location=torch.device(device))
@@ -261,7 +280,7 @@ def main():
     for epoch in range(start_epoch, 2000000000000):
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
-        model.train()
+        set_train_mode(model)
         train_loop(device, dataloader_train, model, optimizer)
 
         # Skip validation and checkpointing when in fast/debug mode — model is
@@ -274,7 +293,7 @@ def main():
         val_result = validatoor.validation_loop(
             device, dataloader_val, model, mse, "val", False, epoch)
         mean_validation_loss = val_result.mean_loss_no_pred
-        model.train()
+        set_train_mode(model)
 
         is_best = mean_validation_loss < best_validation_loss
         if is_best:
