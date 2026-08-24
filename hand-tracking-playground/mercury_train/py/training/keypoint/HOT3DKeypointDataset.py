@@ -44,12 +44,17 @@ Usage:
         min_visibility_ratio=0.2,
     )
 """
+import os
 import random
 import sys
 
 import cv2
 import numpy as np
 import torch
+
+_mercury_train_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../')
+if _mercury_train_root not in sys.path:
+    sys.path.insert(0, _mercury_train_root)
 
 import py.training.common.a_geometry as geo
 from py.training.common.hot3d_keypoint_mapping import hot3d_landmarks_to_project_keypoints
@@ -261,8 +266,6 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
 if __name__ == "__main__":
     import argparse
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../'))
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequence-dirs", required=True, nargs="+")
