@@ -8,7 +8,7 @@ if __name__ == "__main__":
 import local_config
 
 import py.training.common.hot3d_split as hot3d_split
-from HOT3DKeypointDataset import HOT3DKeypointDataset
+from HOT3DKeypointDataset import HOT3DKeypointDataset, worker_init as hot3d_worker_init
 import numpy as np
 import torch
 import torch.nn as nn
@@ -44,7 +44,7 @@ EARLY_STOPPING_PATIENCE = 8
 # Keep every Nth frame of each HOT3D recording. The cameras run at 30 Hz, so
 # consecutive frames are near-duplicates -- see HOT3DKeypointDataset's
 # docstring for the full reasoning.
-HOT3D_FRAME_STRIDE = 5
+HOT3D_FRAME_STRIDE = 10
 
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
@@ -240,21 +240,26 @@ def main():
     print(f"[kpest_trainer] {len(train_dirs)} train / {len(val_dirs)} val HOT3D "
           f"sequences, frame_stride={HOT3D_FRAME_STRIDE}")
 
-    # num_workers=0 is a deliberate, permanent choice, not a placeholder to
-    # revert later. Hot3dDataProvider (and the AriaDataProvider it wraps)
-    # hold live C++ file handles into the .vrs recording files. DataLoader
-    # workers with num_workers>0 are separate forked processes, so multiple
-    # workers ended up doing concurrent, uncoordinated reads on the same
-    # underlying file descriptor -- confirmed empirically: num_workers>0
-    # produced garbled VRS timestamps and JPEG decode failures, then
-    # crashed with "DataLoader worker exited unexpectedly". num_workers=0
-    # removed all of it. A proper fix exists (give each worker its own
-    # Hot3dDataProvider via DataLoader's worker_init_fn) but wasn't built:
-    # train.sbatch only requests --cpus-per-task=4, so the parallelism
-    # ceiling is low, and correctness matters more than throughput here.
-    # persistent_workers=False and timeout=0 below are required companions
-    # -- both PyTorch options only apply when num_workers>0.
-    num_workers = 0
+    # num_workers>0 is safe here ONLY because of HOT3DKeypointDataset's
+    # worker_init(). DataLoader workers are forked processes, so they would
+    # otherwise inherit the parent's already-open Hot3dDataProvider objects,
+    # and two processes reading the same C++ VRS file handle is exactly what
+    # produced garbled timestamps and JPEG decode failures before, then
+    # crashed with "DataLoader worker exited unexpectedly". worker_init
+    # clears each worker's provider cache so every worker opens its own
+    # handles and none is ever shared.
+    #
+    # This is the "proper fix" the previous num_workers=0 comment described
+    # as existing-but-unbuilt. It became possible only once the sample index
+    # stopped holding live provider objects (INDEX_FORMAT_VERSION 2).
+    #
+    # Loading is bound by .vrs image reads over network storage -- measured
+    # at ~0.15 s per sample on the cluster, at under 10% CPU -- so this is
+    # close to a linear speedup in the number of workers. persistent_workers
+    # keeps them (and their open providers) alive between epochs, so the
+    # per-epoch reopen cost is paid once.
+    num_workers = min(4, int(os.environ.get("SLURM_CPUS_PER_TASK",
+                                            multiprocessing.cpu_count())))
 
     def make_hot3d_loader(sequence_dirs, shuffle, drop_last):
         return DataLoader(
@@ -268,8 +273,9 @@ def main():
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
+            worker_init_fn=hot3d_worker_init,
             timeout=0,
-            persistent_workers=False,
+            persistent_workers=num_workers > 0,
             drop_last=drop_last)
 
     dataloader_train = make_hot3d_loader(train_dirs, shuffle=True, drop_last=True)

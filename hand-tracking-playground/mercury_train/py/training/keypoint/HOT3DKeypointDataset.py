@@ -8,11 +8,8 @@ contributes two samples.
 
 Keypoints come from umetrack_hand_data_provider.get_hand_landmarks(),
 reordered via hot3d_keypoint_mapping.hot3d_landmarks_to_project_keypoints
-(see that module's docstring for the thumb-joint approximation caveat).
-2D pixel coordinates come from projecting the mapped 3D world-space
-landmarks through the camera's real calibration (verified against real
-data in smoke_test_hot3d.py: both hands' wrists landed inside the actual
-image bounds).
+(see that module's docstring for the thumb-joint approximation caveat),
+then projected into 2D through the camera's real calibration.
 
 Depth is NOT raw metric distance in meters. It matches ArtificialData's
 native convention exactly, traced from cpp/dataloader/dataloader_pybind.cpp's
@@ -37,50 +34,75 @@ elbow/curls are unconditionally zeroed -- HOT3D has no body-pose data to
 derive them from.
 
 
+WHY THE INDEX HOLDS PROJECTED KEYPOINTS (format version 2)
+----------------------------------------------------------
+Version 1 of this index admitted a sample whenever its 2D bounding box
+cleared min_visibility_ratio, and only discovered later -- inside
+__getitem__, with nothing useful left to do about it -- that some of the
+21 joints projected behind the camera or outside the camera model's valid
+region. The only recourse there was to return a blank placeholder sample.
+
+Measured on the test_aria split, that happened to **40% of all samples**.
+Worse, the placeholder was labelled is_hand=1, so it was not a negative
+example but a mislabelled positive: a black image asserting that a hand
+was present at 21 coincident points. Training on it would have actively
+taught the network that blank images contain hands.
+
+So the full projection now happens during index construction, and an entry
+is emitted only if every joint projects successfully. Three consequences:
+
+1. No placeholder samples reach training at all.
+2. Roughly 40% fewer image reads, because the invalid entries no longer
+   exist to be fetched. Index building itself reads no image data, only
+   poses and calibration, so this validity check is nearly free.
+3. __getitem__ reduces to: read image, crop, augment. Every pose lookup
+   and projection is precomputed and cached, so the per-sample cost is
+   now dominated purely by the .vrs image read.
+
+The residual _empty_sample() path (a genuinely unreadable image) is now
+rare, and is labelled is_hand=0 / has_xy=0 / has_depth=0 so it contributes
+no gradient at all rather than a wrong one.
+
+
 SAMPLE INDEX, CACHING, AND FRAME STRIDE
 ---------------------------------------
-The sample index deliberately holds only plain data --
-(sequence, image stream, timestamp, hand) -- and never a live provider
-object. An earlier version stored the open Hot3dDataProvider in every
-sample tuple, which forced every sequence's .vrs recording to be opened
-before training could begin (110 simultaneous file handles for the Aria
-training split) and made the index impossible to serialise. Over the
-cluster's network storage that cost ~44 minutes of wall-clock at only
-~73 seconds of CPU -- almost pure I/O latency, and it was paid again in
-full on every single run.
-
-Three consequences of the current design:
+The index deliberately holds only plain data -- sequence, image stream,
+timestamp, handedness, and the 21x3 projected keypoints -- and never a
+live provider object. An earlier version stored the open
+Hot3dDataProvider in every sample tuple, which forced every sequence's
+.vrs to be opened before training could begin and made the index
+impossible to serialise. Over the cluster's network storage that cost
+~44 minutes of wall-clock at ~73 seconds of CPU, and it was paid again in
+full on every run.
 
 1. The per-sequence index is cached to disk (see index_cache_dir). The
    cache key includes min_visibility_ratio, frame_stride and
    INDEX_FORMAT_VERSION, so changing any of them -- or changing the
    sampling logic here and bumping the version -- invalidates stale
-   caches automatically instead of silently reusing them. Cache writes
-   go to a temporary file and are then os.replace()d into position, so a
-   job killed mid-write cannot leave a half-written index behind.
+   caches automatically instead of silently reusing them. Writes go to a
+   temporary file and are then os.replace()d into position, so a job
+   killed mid-write cannot leave a half-written index behind.
 
-2. Providers are opened lazily, on first access to a sample from that
-   sequence, and then kept open. They are deliberately NOT evicted:
+2. Providers open lazily, on first access to a sample from that sequence,
+   and are then kept open. They are deliberately NOT evicted:
    DataLoader(shuffle=True) draws consecutive samples from unrelated
-   sequences, so any LRU policy would thrash, reopening .vrs files
-   constantly. Construction therefore does no I/O at all once the cache
-   is warm.
+   sequences, so any LRU policy would thrash. Construction therefore does
+   no I/O once the cache is warm.
+
+   With num_workers>0, each worker MUST clear this cache in its
+   worker_init_fn -- see worker_init() below.
 
 3. frame_stride subsamples timestamps. HOT3D's cameras run at 30 Hz, so
-   consecutive frames are near-duplicates; the full Aria training split
-   is roughly 2.4M hand crops, far more temporal redundancy than a
-   frozen-backbone KeyNet head (~986K trainable parameters) needs. The
-   default of 5 keeps every fifth frame. Set frame_stride=1 to reproduce
-   the original exhaustive behaviour -- that is also how the
-   P0001_10a27bf7 == 11,353 samples regression check is run.
+   consecutive frames are near-duplicates. Set frame_stride=1 to
+   reproduce exhaustive sampling.
 
 Usage:
     ds = HOT3DKeypointDataset(
-        sequence_dirs=["/storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0003_c701bd11"],
+        sequence_dirs=[".../P0003_c701bd11"],
         hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d",
-        object_library_path="/storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/assets",
+        object_library_path=".../dataset/assets",
         min_visibility_ratio=0.2,
-        frame_stride=5,
+        frame_stride=10,
         index_cache_dir="/storage/user/praa/scratch/hot3d_keypoint_index",
     )
 """
@@ -103,10 +125,12 @@ from maker_of_augmentations import AugmentationMaker
 from a_aug_config import aug_config_validatoor
 
 
-# Bump this whenever the sampling logic below changes in a way that would
-# produce a different index for the same inputs. Cached indices built by
-# an older version are then ignored rather than silently reused.
-INDEX_FORMAT_VERSION = 1
+# Bump whenever the sampling logic below changes in a way that would produce
+# a different index for the same inputs. Caches built by an older version are
+# then ignored rather than silently reused.
+#   1 -> box-visibility gate only; invalid projections became blank samples
+#   2 -> full projection validity gate at index time; keypoints cached
+INDEX_FORMAT_VERSION = 2
 
 
 def world_point_to_camera_frame(world_point, T_world_device, T_device_camera):
@@ -134,11 +158,26 @@ def _rotate_hand_keep_depth(kps_with_depth, mat):
     return out
 
 
+def worker_init(worker_id):
+    """
+    DataLoader worker_init_fn. Pass this as worker_init_fn whenever
+    num_workers > 0.
+
+    Workers are forked processes, so they inherit whatever providers the
+    parent already had open -- and two processes reading the same C++ VRS
+    file handle is exactly what produced garbled timestamps and JPEG decode
+    failures previously. Clearing the cache here forces each worker to open
+    its own providers on first access, so no handle is ever shared.
+    """
+    info = torch.utils.data.get_worker_info()
+    if info is not None:
+        info.dataset._open_sequences = {}
+
+
 class _SequenceProviders:
     """
-    Everything that has to be held open for one HOT3D sequence, plus the
-    per-stream values that are fixed for the whole recording and would
-    otherwise be recomputed on every single sample.
+    Everything held open for one HOT3D sequence, plus the per-stream values
+    that are fixed for the whole recording.
     """
 
     def __init__(self, hot3d_data_provider, mono_stream_ids, calibrations):
@@ -157,7 +196,7 @@ class _SequenceProviders:
 class HOT3DKeypointDataset(torch.utils.data.Dataset):
     def __init__(self, sequence_dirs: list, hot3d_repo_root: str,
                  object_library_path: str, min_visibility_ratio: float = 0.2,
-                 frame_stride: int = 5, index_cache_dir: str = None):
+                 frame_stride: int = 10, index_cache_dir: str = None):
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
@@ -182,35 +221,43 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         self._object_library = load_object_library(
             object_library_folderpath=object_library_path)
 
-        # seq_dir -> _SequenceProviders, populated lazily, never evicted.
+        # seq_dir -> _SequenceProviders, lazily populated, never evicted.
+        # Cleared per worker process by worker_init() above.
         self._open_sequences = {}
 
         if self.index_cache_dir:
             os.makedirs(self.index_cache_dir, exist_ok=True)
 
-        # Parallel arrays, one entry per sample. Kept as numpy rather than a
-        # list of tuples purely for size: the full-rate Aria split is a few
-        # million samples, where Python tuple overhead alone runs to
-        # hundreds of megabytes.
-        seq_idx, stream_str, ts, hand_key, hand_index = [], [], [], [], []
+        seq_idx, stream_str, ts, is_right, kps = [], [], [], [], []
+        n_candidates = 0
 
         for i, seq_dir in enumerate(self.sequence_dirs):
-            entries = self._index_for_sequence(seq_dir)
-            for e_stream_str, e_ts, e_hand_key, e_hand_index in entries:
+            entries, candidates = self._index_for_sequence(seq_dir)
+            n_candidates += candidates
+            for e in entries:
                 seq_idx.append(i)
-                stream_str.append(e_stream_str)
-                ts.append(e_ts)
-                hand_key.append(e_hand_key)
-                hand_index.append(e_hand_index)
+                stream_str.append(e[0])
+                ts.append(e[1])
+                is_right.append(e[2])
+                kps.append(e[3])
 
         self._seq_idx = np.asarray(seq_idx, dtype=np.int32)
         self._stream_str = np.asarray(stream_str, dtype=np.str_)
         self._ts = np.asarray(ts, dtype=np.int64)
-        self._hand_key = np.asarray(hand_key, dtype=np.str_)
-        self._hand_index = np.asarray(hand_index, dtype=np.int8)
+        self._is_right = np.asarray(is_right, dtype=bool)
+        self._kps = (np.asarray(kps, dtype=np.float32).reshape(-1, 21, 3)
+                     if kps else np.zeros((0, 21, 3), dtype=np.float32))
 
         self.actual_size = len(self._ts)
         self.num_times_to_repeat = 1
+        self.n_rejected_by_projection = n_candidates - self.actual_size
+
+        if n_candidates:
+            pct = 100.0 * self.n_rejected_by_projection / n_candidates
+            print(f"[HOT3DKeypointDataset] {self.actual_size} samples from "
+                  f"{len(self.sequence_dirs)} sequences "
+                  f"({self.n_rejected_by_projection} of {n_candidates} candidates "
+                  f"rejected, {pct:.1f}%, joints outside the camera model)")
 
     # ------------------------------------------------------------------
     # Sample index: build, cache, load
@@ -226,47 +273,50 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
     def _index_for_sequence(self, seq_dir):
         """
-        Return the sample index for one sequence as a list of
-        (stream_id_str, timestamp_ns, hand_key_str, hand_index) tuples,
-        loading it from the on-disk cache when possible.
+        Returns (entries, n_candidates), where each entry is
+        (stream_id_str, timestamp_ns, is_right, keypoints_px_and_depth).
+        n_candidates counts hands that passed the box-visibility gate,
+        including those later rejected for failing to project.
         """
         cache_path = self._cache_path(seq_dir)
 
         if cache_path and os.path.exists(cache_path):
             try:
                 with np.load(cache_path, allow_pickle=False) as z:
-                    return list(zip(
+                    entries = list(zip(
                         z["stream_str"].tolist(),
                         z["ts"].tolist(),
-                        z["hand_key"].tolist(),
-                        z["hand_index"].tolist(),
+                        z["is_right"].tolist(),
+                        list(z["kps"]),
                     ))
+                    return entries, int(z["n_candidates"])
             except (OSError, ValueError, KeyError) as e:
-                # A truncated or otherwise unreadable cache file should cost
-                # a rebuild, not the whole run.
                 print(f"[HOT3DKeypointDataset] ignoring unreadable index cache "
                       f"{cache_path}: {e}", file=sys.stderr)
 
-        entries = self._build_index_for_sequence(seq_dir)
+        entries, n_candidates = self._build_index_for_sequence(seq_dir)
 
         if cache_path:
-            self._save_index(cache_path, entries)
+            self._save_index(cache_path, entries, n_candidates)
 
-        return entries
+        return entries, n_candidates
 
-    def _save_index(self, cache_path, entries):
+    def _save_index(self, cache_path, entries, n_candidates):
         """
         Write atomically: a job killed mid-write must not leave a
         half-written index that a later run would happily load.
         """
         tmp_path = f"{cache_path}.tmp{os.getpid()}"
         try:
+            kps = (np.asarray([e[3] for e in entries], dtype=np.float32)
+                   if entries else np.zeros((0, 21, 3), dtype=np.float32))
             np.savez(
                 tmp_path,
                 stream_str=np.asarray([e[0] for e in entries], dtype=np.str_),
                 ts=np.asarray([e[1] for e in entries], dtype=np.int64),
-                hand_key=np.asarray([e[2] for e in entries], dtype=np.str_),
-                hand_index=np.asarray([e[3] for e in entries], dtype=np.int8),
+                is_right=np.asarray([e[2] for e in entries], dtype=bool),
+                kps=kps.reshape(-1, 21, 3),
+                n_candidates=np.asarray(n_candidates, dtype=np.int64),
             )
             os.replace(f"{tmp_path}.npz", cache_path)
         except OSError as e:
@@ -279,14 +329,51 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                     except OSError:
                         pass
 
+    def _project_hand(self, world_keypoints, T_world_device,
+                      T_device_camera, camera_calibration):
+        """
+        World-space (21,3) landmarks -> (21,3) of [x_px, y_px, relative_depth],
+        or None if any joint falls behind the camera or outside the camera
+        model's valid region. Returning None here -- at index time -- is the
+        whole point of format version 2: the sample is simply never emitted.
+        """
+        camera_points = np.zeros((21, 3), dtype=np.float32)
+        for i in range(21):
+            camera_points[i] = world_point_to_camera_frame(
+                world_keypoints[i], T_world_device, T_device_camera)
+
+        if np.any(camera_points[:, 2] <= 0):
+            return None  # a joint landed behind the camera
+
+        out = np.zeros((21, 3), dtype=np.float32)
+        for i in range(21):
+            pixel = camera_calibration.project(camera_points[i])
+            if pixel is None:
+                return None  # outside the camera model's valid region
+            out[i, :2] = pixel
+
+        # Relative depth, matching ArtificialData's native convention exactly
+        # (see module docstring): each joint's full 3D distance from the
+        # camera, minus the middle-proximal joint's own distance from the
+        # camera, divided by the wrist-to-middle-pxm "hand size".
+        hand_size = np.linalg.norm(world_keypoints[0] - world_keypoints[9])
+        if hand_size <= 0:
+            return None
+        midpxm_depth = np.linalg.norm(camera_points[9])
+        joint_distances = np.linalg.norm(camera_points, axis=1)
+        out[:, 2] = (joint_distances - midpxm_depth) / hand_size
+        return out
+
     def _build_index_for_sequence(self, seq_dir):
         TimeDomain = self._TimeDomain
         TimeQueryOptions = self._TimeQueryOptions
 
         bundle = self._providers_for(seq_dir)
         entries = []
+        n_candidates = 0
 
         for stream_id in bundle.mono_stream_ids:
+            T_device_camera, camera_calibration = bundle.calibrations[str(stream_id)]
             timestamps = self._sequence_timestamps(bundle, stream_id)
 
             for ts in timestamps[::self.frame_stride]:
@@ -297,6 +384,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                 )
                 if device_pose is None:
                     continue
+                T_world_device = device_pose.pose3d.T_world_device
 
                 hand_poses_with_dt = bundle.umetrack_provider.get_pose_at_timestamp(
                     timestamp_ns=ts,
@@ -306,9 +394,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                 if hand_poses_with_dt is None:
                     continue
 
-                # Fetched once per (stream, timestamp): it carries both
-                # hands, so re-fetching it inside the per-hand loop --
-                # as an earlier version did -- was pure waste.
+                # Fetched once per (stream, timestamp): it carries both hands,
+                # so re-fetching it inside the per-hand loop was pure waste.
                 box_result = bundle.hand_box2d_provider.get_bbox_at_timestamp(
                     stream_id=stream_id,
                     timestamp_ns=ts,
@@ -318,14 +405,14 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                 if box_result is None:
                     continue
 
-                for key, hand_pose_data in hand_poses_with_dt.pose3d_collection.poses.items():
-                    # Unlike HOT3DVRSDetectionDataset (which keeps every
-                    # frame, including ones with no visible hand, as
-                    # negative "exists=0" examples for DetNet's detection
-                    # task), KeyNet has no "hand exists" signal to train --
-                    # it only ever consumes an already-cropped hand image.
-                    # A hand that isn't visible enough simply has no valid
-                    # crop, so we skip it entirely.
+                for hand_pose_data in hand_poses_with_dt.pose3d_collection.poses.values():
+                    # Unlike HOT3DVRSDetectionDataset (which keeps every frame,
+                    # including hand-free ones, as negative exists=0 examples
+                    # for DetNet's detection task), KeyNet has no hand-presence
+                    # signal to train here -- it only ever consumes an
+                    # already-cropped hand image, and hand presence is DetNet's
+                    # responsibility. A hand that isn't visible enough simply
+                    # has no valid crop, so it is skipped entirely.
                     #
                     # ASSUMED 0=left, 1=right, matching
                     # HOT3DVRSDetectionDataset's own (also unverified)
@@ -338,13 +425,24 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                             hand_box.visibility_ratio < self.min_visibility_ratio:
                         continue
 
-                    # The pose collection's own key identifies the hand
-                    # unambiguously. Storing it (rather than a derived
-                    # left/right flag) means __getitem__ re-selects exactly
-                    # the same pose object this index entry was built from.
-                    entries.append((str(stream_id), int(ts), str(key), hand_index))
+                    n_candidates += 1
 
-        return entries
+                    landmarks = bundle.umetrack_provider.get_hand_landmarks(hand_pose_data)
+                    if landmarks is None:
+                        continue
+                    world_keypoints = hot3d_landmarks_to_project_keypoints(
+                        landmarks.detach().cpu().numpy())
+
+                    projected = self._project_hand(
+                        world_keypoints, T_world_device,
+                        T_device_camera, camera_calibration)
+                    if projected is None:
+                        continue
+
+                    entries.append((str(stream_id), int(ts),
+                                    bool(hand_pose_data.is_right_hand), projected))
+
+        return entries, n_candidates
 
     # ------------------------------------------------------------------
     # Providers
@@ -362,10 +460,10 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         )
         device_data_provider = hot3d_data_provider.device_data_provider
 
-        # Skip the RGB camera -- same reasoning as
-        # HOT3DVRSDetectionDataset: this project's camera model is 2
-        # monochrome cameras, matching the target headset hardware. (Quest
-        # recordings have no RGB stream at all, so this is a no-op there.)
+        # Skip the RGB camera -- same reasoning as HOT3DVRSDetectionDataset:
+        # this project's camera model is 2 monochrome cameras, matching the
+        # target headset hardware. (Quest recordings have no RGB stream at
+        # all, so this is a no-op there.)
         mono_stream_ids = [s for s in device_data_provider.get_image_stream_ids()
                            if not str(s).startswith("214-")]
 
@@ -380,26 +478,24 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         """
         Per-stream capture timestamps for one image stream.
 
-        Aria and Quest expose genuinely different APIs here, not just
+        Aria and Quest expose genuinely different APIs here, not merely
         different argument counts:
 
             AriaDataProvider.get_sequence_timestamps(stream_id, time_domain)
                 -> that one stream's timestamps
             QuestDataProvider.get_sequence_timestamps()
-                -> the merged, de-duplicated set of every image timestamp
-                   in the recording, in the recording's own DEVICE_TIME
-                   domain, because Quest 3 HOT3D recordings carry no
-                   TimeCode track at all (see
-                   py/training/common/hot3d_timecode_compat.py)
+                -> the merged, de-duplicated set of every image timestamp in
+                   the recording, in the recording's own DEVICE_TIME domain,
+                   because Quest 3 HOT3D recordings carry no TimeCode track
+                   at all (see py/training/common/hot3d_timecode_compat.py)
 
-        Feeding Quest's merged list straight into a per-stream lookup
-        could silently return a frame from the wrong capture instant, so
-        this raises instead. Quest support belongs in the evaluation
-        path, where get_frameset_from_timestamp() can map a reference
-        timestamp onto each stream's own nearest capture time under an
-        explicit tolerance. Training is Aria-only by design (see
-        py/training/common/hot3d_split.py), so nothing in the training
-        path reaches this.
+        Feeding Quest's merged list straight into a per-stream lookup could
+        silently return a frame from the wrong capture instant, so this
+        raises instead. Quest support belongs in the evaluation path, where
+        get_frameset_from_timestamp() can map a reference timestamp onto each
+        stream's own nearest capture time under an explicit tolerance.
+        Training is Aria-only by design (see py/training/common/hot3d_split.py),
+        so nothing in the training path reaches this.
         """
         headset = bundle.hot3d_data_provider.get_device_type()
         if getattr(headset, "name", str(headset)) != "Aria":
@@ -420,76 +516,21 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         idx = idx % self.actual_size
-        TimeDomain = self._TimeDomain
-        TimeQueryOptions = self._TimeQueryOptions
 
         seq_dir = self.sequence_dirs[int(self._seq_idx[idx])]
         stream_str = str(self._stream_str[idx])
         ts = int(self._ts[idx])
-        hand_key = str(self._hand_key[idx])
+        is_right = bool(self._is_right[idx])
+        keypoints_px_and_depth = self._kps[idx].copy()
 
         bundle = self._providers_for(seq_dir)
         stream_id = bundle.stream_id_by_str[stream_str]
-        T_device_camera, camera_calibration = bundle.calibrations[stream_str]
-
-        device_pose = bundle.device_pose_provider.get_pose_at_timestamp(
-            timestamp_ns=ts,
-            time_query_options=TimeQueryOptions.CLOSEST,
-            time_domain=TimeDomain.TIME_CODE,
-        )
-        if device_pose is None:
-            return self._empty_sample()
-        T_world_device = device_pose.pose3d.T_world_device
-
-        hand_poses_with_dt = bundle.umetrack_provider.get_pose_at_timestamp(
-            timestamp_ns=ts,
-            time_query_options=TimeQueryOptions.CLOSEST,
-            time_domain=TimeDomain.TIME_CODE,
-        )
-        if hand_poses_with_dt is None:
-            return self._empty_sample()
-
-        hand_pose_data = None
-        for key, pose in hand_poses_with_dt.pose3d_collection.poses.items():
-            if str(key) == hand_key:
-                hand_pose_data = pose
-                break
-        if hand_pose_data is None:
-            return self._empty_sample()
 
         image = bundle.device_data_provider.get_image(ts, stream_id)
         if image is None:
+            # Rare since format version 2 -- every other failure mode is now
+            # caught at index time.
             return self._empty_sample()
-
-        hot3d_landmarks = bundle.umetrack_provider.get_hand_landmarks(hand_pose_data)
-        hot3d_landmarks = hot3d_landmarks.detach().cpu().numpy()
-        world_keypoints = hot3d_landmarks_to_project_keypoints(hot3d_landmarks)  # (21, 3), world space
-
-        camera_points = np.zeros((21, 3), dtype=np.float32)
-        for i in range(21):
-            camera_points[i] = world_point_to_camera_frame(
-                world_keypoints[i], T_world_device, T_device_camera)
-
-        if np.any(camera_points[:, 2] <= 0):
-            return self._empty_sample()  # a keypoint landed behind the camera
-
-        keypoints_px_and_depth = np.zeros((21, 3), dtype=np.float32)
-        for i in range(21):
-            pixel = camera_calibration.project(camera_points[i])
-            if pixel is None:
-                return self._empty_sample()
-            keypoints_px_and_depth[i, :2] = pixel
-
-        # Relative depth, matching ArtificialData's native convention
-        # exactly (see module docstring): each joint's full 3D distance
-        # from the camera, minus the middle-proximal joint's own distance
-        # from the camera, divided by the wrist-to-middle-pxm "hand size".
-        hand_size = np.linalg.norm(world_keypoints[0] - world_keypoints[9])  # wrist -> middle_pxm
-        midpxm_depth = np.linalg.norm(camera_points[9])
-        joint_distances = np.linalg.norm(camera_points, axis=1)
-        keypoints_px_and_depth[:, 2] = (joint_distances - midpxm_depth) / hand_size
-
-        is_right = hand_pose_data.is_right_hand
 
         # Same cropping approach as RandoDataset: derive the crop from a
         # NOISED version of the keypoints (simulating a previous frame's
@@ -501,8 +542,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         keypoints_cropped = _rotate_hand_keep_depth(keypoints_px_and_depth, trans)
 
         # Matches RandoDataset's own "30% chance of no predicted input"
-        # convention, so this data source behaves consistently with the
-        # rest of KeyNet's training data.
+        # convention, so this data source behaves consistently with the rest
+        # of KeyNet's training data.
         predicted_px = None
         if random.uniform(0, 1) >= 0.3:
             predicted_px = rotate_hand(noisy_keypoints, trans)
@@ -519,10 +560,29 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         return ret
 
     def _empty_sample(self):
+        """
+        Placeholder for an unreadable image.
+
+        Flagged is_hand=0 / has_xy=0 / has_depth=0 so every loss term masks
+        it out and it contributes no gradient. Version 1 of this class left
+        is_hand=1, which made each placeholder a mislabelled POSITIVE -- a
+        black image asserting a hand was present at 21 coincident points.
+        That is not a negative training example, it is a wrong one.
+
+        Note this is still not a useful negative even so: a genuine negative
+        would be a crop of a real frame containing no hand. Hand presence is
+        DetNet's task (HOT3DVRSDetectionDataset does keep hand-free frames as
+        exists=0 examples), and settings.existence_loss_mul is 0 for this
+        fine-tuning, so KeyNet's existence head is deliberately left at its
+        Monado initialisation.
+        """
         blank = np.zeros((128, 128), dtype=np.uint8)
         zeros_kps = np.zeros((21, 3), dtype=np.float32)
         ret = self.augmaker.do_one_augmentation(
             blank, zeros_kps, mask=None, img_alpha_premultiplied=False, is_right=False)
+        ret["is_hand"] = np.float32(0)
+        ret["has_xy"] = np.float32(0)
+        ret["has_depth"] = np.float32(0)
         ret["elbow"] = torch.zeros(3).float()
         ret["curls"] = torch.zeros(5).float()
         return ret
@@ -536,13 +596,8 @@ if __name__ == "__main__":
     parser.add_argument("--hot3d-repo-root", required=True)
     parser.add_argument("--object-library-path", required=True)
     parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
-    parser.add_argument("--frame-stride", type=int, default=5,
-                        help="keep every Nth frame; 1 reproduces the original "
-                             "exhaustive sampling (used for the 11,353-sample "
-                             "regression check on P0001_10a27bf7)")
-    parser.add_argument("--index-cache-dir", default=None,
-                        help="directory for the on-disk sample index cache, "
-                             "e.g. /storage/user/praa/scratch/hot3d_keypoint_index")
+    parser.add_argument("--frame-stride", type=int, default=10)
+    parser.add_argument("--index-cache-dir", default=None)
     args = parser.parse_args()
 
     ds = HOT3DKeypointDataset(

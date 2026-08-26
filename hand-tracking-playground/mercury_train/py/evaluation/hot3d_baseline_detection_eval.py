@@ -102,6 +102,24 @@ NO_GT_TEST_PARTICIPANTS = {"P0004", "P0005", "P0006", "P0008", "P0016", "P0020"}
 CROSS_DEVICE_HELD_OUT_PARTICIPANTS = {"P0002", "P0003", "P0010"}  # captured on both Aria + Quest, has GT
 
 
+def participant_id_of(seq_dir):
+    return os.path.basename(os.path.normpath(seq_dir)).split("_")[0]
+
+
+def filter_sequence_dirs(all_seq_dirs, split):
+    """split in {'train', 'cross_device_test', 'all_labeled'}. Always drops
+    the no-GT official HOT3D test participants -- they have no annotations
+    to train or evaluate against regardless of split."""
+    usable = [d for d in all_seq_dirs if participant_id_of(d) not in NO_GT_TEST_PARTICIPANTS]
+    if split == "all_labeled":
+        return usable
+    if split == "cross_device_test":
+        return [d for d in usable if participant_id_of(d) in CROSS_DEVICE_HELD_OUT_PARTICIPANTS]
+    if split == "train":
+        return [d for d in usable if participant_id_of(d) not in CROSS_DEVICE_HELD_OUT_PARTICIPANTS]
+    raise ValueError(f"unknown split {split!r}")
+
+
 # ---------------------------------------------------------------------------
 # Preprocessing -- ported from hg_model.cpp. See module docstring for the
 # verification caveats on both functions below.
@@ -284,28 +302,6 @@ class Hot3dRawFrameSource:
                         "visibility_ratio": hand_box.visibility_ratio,
                     })
         return seq_name, str(stream_id), ts, image, gt_boxes
-
-
-# ---------------------------------------------------------------------------
-# Split helpers -- matches FOUR_WEEK_SUBMISSION_PLAN.md's participant design.
-# ---------------------------------------------------------------------------
-
-def participant_id_of(seq_dir):
-    return os.path.basename(os.path.normpath(seq_dir)).split("_")[0]
-
-
-def filter_sequence_dirs(all_seq_dirs, split):
-    """split in {'train', 'cross_device_test', 'all_labeled'}. Always drops
-    the no-GT official HOT3D test participants -- they have no annotations
-    to evaluate against regardless of split."""
-    usable = [d for d in all_seq_dirs if participant_id_of(d) not in NO_GT_TEST_PARTICIPANTS]
-    if split == "all_labeled":
-        return usable
-    if split == "cross_device_test":
-        return [d for d in usable if participant_id_of(d) in CROSS_DEVICE_HELD_OUT_PARTICIPANTS]
-    if split == "train":
-        return [d for d in usable if participant_id_of(d) not in CROSS_DEVICE_HELD_OUT_PARTICIPANTS]
-    raise ValueError(f"unknown split {split!r}")
 
 
 # ---------------------------------------------------------------------------

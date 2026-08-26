@@ -79,7 +79,7 @@ from torch.utils.data import DataLoader
 
 import local_config
 import py.training.common.hot3d_split as hot3d_split
-from HOT3DKeypointDataset import HOT3DKeypointDataset
+from HOT3DKeypointDataset import HOT3DKeypointDataset, worker_init as hot3d_worker_init
 import KeyNet
 from load_weights import load_keynet_weights
 
@@ -190,7 +190,7 @@ def sequence_dirs_for_split(split):
     return hot3d_split.list_sequence_dirs(root, split)
 
 
-def evaluate(model, dataloader, device, use_predicted_input):
+def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None):
     """
     Returns a dict of metrics. Joints whose ground truth falls outside the
     128x128 crop are excluded: their Gaussian would sit off the heatmap grid
@@ -206,8 +206,12 @@ def evaluate(model, dataloader, device, use_predicted_input):
     n_degenerate = 0
 
     total_batches = len(dataloader)
+    if limit_batches:
+        total_batches = min(total_batches, limit_batches)
     with torch.no_grad():
         for batch_idx, doct in enumerate(dataloader):
+            if limit_batches and batch_idx >= limit_batches:
+                break
             if batch_idx % 20 == 0:
                 print(f"  batch {batch_idx}/{total_batches}", flush=True)
 
@@ -334,6 +338,15 @@ def main():
                         help="ABLATION ONLY: feed the noised ground-truth "
                              "previous-frame keypoints. Leaks ground truth "
                              "into the input; not the headline number.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="score only the first N batches. For quick sanity "
+                             "checks -- a full split takes hours, 20 batches "
+                             "takes a minute.")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="DataLoader workers. Safe above 0 thanks to "
+                             "HOT3DKeypointDataset.worker_init; use it with "
+                             "--limit to verify workers agree with the "
+                             "single-process path before trusting a long run.")
     parser.add_argument("--out", default=None, help="write metrics as JSON here")
     args = parser.parse_args()
 
@@ -361,7 +374,8 @@ def main():
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,       # see kpest_trainer.py: providers hold live VRS handles
+        num_workers=args.num_workers,
+        worker_init_fn=hot3d_worker_init,
         timeout=0,
         persistent_workers=False,
         drop_last=False)
@@ -369,7 +383,7 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model, source = build_model(args.weights, device)
 
-    result = evaluate(model, dataloader, device, args.use_predicted_input)
+    result = evaluate(model, dataloader, device, args.use_predicted_input, args.limit)
     print_report(args.split, source, args.frame_stride, args.use_predicted_input, result)
 
     if args.out:

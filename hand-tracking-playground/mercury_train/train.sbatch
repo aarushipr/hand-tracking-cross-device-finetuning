@@ -4,16 +4,19 @@
 #SBATCH --cpus-per-task=4
 # ↑ chair SLURM policy: no more than 4 CPU cores per GPU requested.
 #SBATCH --gres=gpu:1,VRAM:24G
-#SBATCH --mem=32G
-#SBATCH --time=08:00:00
-# ↑ 8 hours is plenty for a sanity-scale dataset. Do NOT raise this past
-#   8:00:00 without first confirming your account isn't subject to the
-#   practical-student cap (max 1x 24GB GPU, 8h jobs, requires
-#   --part=PRACT --qos=practical_course below). If you've confirmed you're
-#   NOT a practical student, it's safe to raise this for full-dataset runs.
-# If you ARE a practical student, uncomment the next line (mandatory):
-# #SBATCH --part=PRACT
-# #SBATCH --qos=practical_course
+#SBATCH --mem=64G
+# ↑ raised from 32G: with num_workers=4 each DataLoader worker opens its
+#   own Hot3dDataProvider per sequence, so provider memory scales with the
+#   worker count. Watch `seff <jobid>` after the first run and trim if the
+#   headroom turns out to be large.
+#SBATCH --time=3-00:00:00
+# ↑ verified 2026-08-26, not guessed: partition NORMAL has
+#   MaxTime=14-00:00:00 and DefaultTime=08:00:00, and QOS `stud` sets no
+#   MaxWall (`scontrol show partition`, `sacct -j 1590166`). The old
+#   08:00:00 here was simply the untouched partition default, and the
+#   practical-student cap it warned about does not apply to this account.
+#   72h is a ceiling, not an estimate: early stopping (patience 8) is
+#   expected to end the run well before it.
 #SBATCH --mail-type=END,FAIL
 #SBATCH --output=/storage/slurm/logs/slurm-%j.out
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
@@ -35,6 +38,14 @@ module load cuda/11.8.0
 module load opencv/4.5.3-nonfree
 
 export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/opencv/4.5.3-nonfree/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+# Each DataLoader worker keeps its own .vrs handles open for every sequence
+# it touches; 4 workers over ~110 sequences runs to a few thousand file
+# descriptors, comfortably above the usual 1024 default.
+ulimit -n 8192
+# Without these, PyTorch sizes its CPU thread pool to every core it can see
+# on the node rather than the 4 actually allocated to this job.
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
 
 # Disable GUI - there is no display on the cluster. This is required.
 export AD4_ENABLEGUI=0
@@ -42,9 +53,10 @@ export AD4_ENABLEGUI=0
 # Set to 1 to enable Weights & Biases experiment tracking
 export AD4_ENABLEWANDB=1
 
-# Set to 1 for a quick sanity check run (only loads real sequence count,
-# capped at 25 — working-code's ArtificialData.py was patched to not crash
-# when fewer than 25 sequences exist on disk).
+# Set to 1 for a quick smoke test: 2 training and 1 validation HOT3D
+# sequence, writing to checkpoints_loadfast/ so it cannot contaminate a real
+# run's checkpoints. (This used to refer to ArtificialData.py's 25-sequence
+# cap; that data source is no longer used -- training is HOT3D-only.)
 export AD4_LOADFAST=0
 
 # Confirmed clone location (2026-07-20): includes the
