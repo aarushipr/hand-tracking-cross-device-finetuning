@@ -67,6 +67,16 @@ def filter_sequence_dirs(all_seq_dirs, split):
     if split == "test_quest":
         return [d for d in held_out if headset_of(d) == "Quest3"]
 
+    # Quest recordings of the TRAINING participants. Training is Aria-only,
+    # so these are never seen during training either -- but unlike
+    # test_quest, the people in them ARE the people the model trained on.
+    # test_quest changes two things at once (new subjects AND a new device);
+    # this changes only the device. Comparing the two separates the
+    # cross-device gap from the cross-subject gap, instead of reporting them
+    # fused into a single uninterpretable number.
+    if split == "device_shift_quest":
+        return [d for d in train_pool if headset_of(d) == "Quest3"]
+
     # Both devices' held-out sequences together. Retained so the existing
     # hot3d_baseline_detection_eval.py caller keeps working unchanged.
     if split == "cross_device_test":
@@ -109,7 +119,8 @@ def _report(dataset_root):
     """Print the real split sizes for a dataset root. See __main__ below."""
     print(f"HOT3D catalogue at {dataset_root}\n")
 
-    for split in ("all_labeled", "train", "test_aria", "test_quest"):
+    for split in ("all_labeled", "train", "test_aria", "test_quest",
+                  "device_shift_quest"):
         dirs = list_sequence_dirs(dataset_root, split)
         participants = sorted({participant_id_of(d) for d in dirs})
         print(f"  {split:16s} {len(dirs):4d} sequences  "
