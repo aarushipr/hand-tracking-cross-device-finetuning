@@ -195,7 +195,22 @@ def main():
 
     # Training: HOT3D only
     hot3d_train_dirs = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
-    hot3d_train_dirs = hot3d_train_dirs[:3]
+    # num_workers=0 is a deliberate, permanent choice, not a placeholder to
+    # revert later. Hot3dDataProvider (and the AriaDataProvider it wraps)
+    # hold live C++ file handles into the .vrs recording files. DataLoader
+    # workers with num_workers>0 are separate forked processes, so multiple
+    # workers ended up doing concurrent, uncoordinated reads on the same
+    # underlying file descriptor -- confirmed empirically: num_workers>0
+    # produced garbled VRS timestamps and JPEG decode failures, then
+    # crashed with "DataLoader worker exited unexpectedly". num_workers=0
+    # removed all of it. A proper fix exists (give each worker its own
+    # Hot3dDataProvider via DataLoader's worker_init_fn) but wasn't built:
+    # train.sbatch only requests --cpus-per-task=4, so the parallelism
+    # ceiling is low, and no full 185-sequence run has completed yet, so
+    # correctness matters more than throughput right now.
+    # persistent_workers=False and timeout=0 below are required companions
+    # -- both PyTorch options only apply when num_workers>0.
+    num_workers = 0
     dataloader_train = DataLoader(
         HOT3DKeypointDataset(
             sequence_dirs=hot3d_train_dirs,
@@ -205,8 +220,8 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        timeout=100,
-        persistent_workers=True,
+        timeout=0,
+        persistent_workers=False,
         drop_last=True)
 
     # Validation (run every epoch): FreiHand — a different capture setup from
