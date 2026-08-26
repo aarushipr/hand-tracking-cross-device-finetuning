@@ -9,7 +9,6 @@ import local_config
 
 import py.training.common.hot3d_split as hot3d_split
 from HOT3DKeypointDataset import HOT3DKeypointDataset
-from RandoData import RandoDataset
 import numpy as np
 import torch
 import torch.nn as nn
@@ -30,6 +29,22 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 mse = nn.MSELoss(reduction='mean')
 gnll = nn.GaussianNLLLoss(reduction='none')
+
+# --- Fine-tuning schedule (Chapter 4, Table 4.1) ---------------------------
+# Hard ceiling on epochs. Training normally stops earlier, through the
+# early-stopping patience below; this only bounds the SLURM job.
+MAX_EPOCHS = 40
+
+# Stop after this many consecutive epochs with no improvement in validation
+# loss. Deliberately generous: the validation split is a handful of HOT3D
+# sequences, so epoch-to-epoch validation loss is noisy, and a tight patience
+# would stop on that noise rather than on genuine convergence.
+EARLY_STOPPING_PATIENCE = 8
+
+# Keep every Nth frame of each HOT3D recording. The cameras run at 30 Hz, so
+# consecutive frames are near-duplicates -- see HOT3DKeypointDataset's
+# docstring for the full reasoning.
+HOT3D_FRAME_STRIDE = 5
 
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
@@ -193,8 +208,38 @@ def main():
 
     batch_size = batch_size_per_device * num_devices
 
-    # Training: HOT3D only
-    hot3d_train_dirs = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
+    # ------------------------------------------------------------------
+    # Data: HOT3D only, Aria only.
+    #
+    # Training and validation both come out of hot3d_split's "train" split,
+    # which is Aria-only by design: Quest recordings are never seen during
+    # training, so that evaluating on Quest measures generalisation to an
+    # unseen *device* rather than merely to unseen subjects. See
+    # py/training/common/hot3d_split.py for the full split rationale.
+    #
+    # There is deliberately no test set here. All evaluation lives in
+    # evaluate_keypoint.py, so that the zero-shot Monado baseline and this
+    # fine-tuned model are scored by exactly the same code path, and the
+    # metric can be changed without retraining anything.
+    # ------------------------------------------------------------------
+    train_pool = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
+    if not train_pool:
+        raise RuntimeError(
+            f"[kpest_trainer] No HOT3D Aria training sequences found under "
+            f"{local_config.hot3d_dataset_path} -- nothing to train on.")
+
+    train_dirs, val_dirs = hot3d_split.split_train_val(train_pool)
+
+    # loadfast is a smoke test: prove the pipeline runs end to end in
+    # minutes, not produce a model worth keeping. Two training sequences and
+    # one validation sequence exercise every code path below.
+    if header.env_settings.loadfast:
+        train_dirs = train_dirs[:2]
+        val_dirs = val_dirs[:1] or train_dirs[:1]
+
+    print(f"[kpest_trainer] {len(train_dirs)} train / {len(val_dirs)} val HOT3D "
+          f"sequences, frame_stride={HOT3D_FRAME_STRIDE}")
+
     # num_workers=0 is a deliberate, permanent choice, not a placeholder to
     # revert later. Hot3dDataProvider (and the AriaDataProvider it wraps)
     # hold live C++ file handles into the .vrs recording files. DataLoader
@@ -206,60 +251,29 @@ def main():
     # removed all of it. A proper fix exists (give each worker its own
     # Hot3dDataProvider via DataLoader's worker_init_fn) but wasn't built:
     # train.sbatch only requests --cpus-per-task=4, so the parallelism
-    # ceiling is low, and no full 185-sequence run has completed yet, so
-    # correctness matters more than throughput right now.
+    # ceiling is low, and correctness matters more than throughput here.
     # persistent_workers=False and timeout=0 below are required companions
     # -- both PyTorch options only apply when num_workers>0.
     num_workers = 0
-    dataloader_train = DataLoader(
-        HOT3DKeypointDataset(
-            sequence_dirs=hot3d_train_dirs,
-            hot3d_repo_root=local_config.hot3d_repo_root,
-            object_library_path=local_config.hot3d_object_library_path,
-        ),
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        timeout=0,
-        persistent_workers=False,
-        drop_last=True)
 
-    # Validation (run every epoch): FreiHand — a different capture setup from
-    # training data, tests whether the model generalises to a new real dataset.
-    #
-    # Skipped entirely in loadfast mode: RandoDataset's __init__ eagerly
-    # pd.read_csv()s frei_gs.csv/tom.csv, which crashes immediately (before
-    # any training batch even runs) if those real datasets aren't present.
-    # loadfast is meant to be a synthetic-data-only smoke test — CombinedDataset
-    # already skips real datasets for training on the same principle, this
-    # just extends it to validation/test.
-    dataloader_val = None
-    dataloader_test = None
-    if not header.env_settings.loadfast:
-        dataloader_val = DataLoader(
-            RandoDataset(local_config.real_datasets_basepath, "frei_gs.csv"),
+    def make_hot3d_loader(sequence_dirs, shuffle, drop_last):
+        return DataLoader(
+            HOT3DKeypointDataset(
+                sequence_dirs=sequence_dirs,
+                hot3d_repo_root=local_config.hot3d_repo_root,
+                object_library_path=local_config.hot3d_object_library_path,
+                frame_stride=HOT3D_FRAME_STRIDE,
+                index_cache_dir=getattr(local_config, "hot3d_index_cache_dir", None),
+            ),
             batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers)
+            shuffle=shuffle,
+            num_workers=num_workers,
+            timeout=0,
+            persistent_workers=False,
+            drop_last=drop_last)
 
-        # Test (run once after training): Tom OpenHands — held out entirely.
-        # Replace with HOT3D / UmeTrack once those datasets are obtained, as they
-        # represent true cross-device generalisation to different XR hardware.
-        #
-        # tom.csv doesn't exist yet as of 2026-07-20 (the source dataset is
-        # harder to source than FreiHand/Panoptic) — skip gracefully rather
-        # than crash on startup, same reasoning as CombinedDataset's
-        # b_if_present. Final test evaluation below is skipped too if this
-        # is None.
-        tom_csv_path = os.path.join(local_config.real_datasets_basepath, "tom.csv")
-        if os.path.exists(tom_csv_path):
-            dataloader_test = DataLoader(
-                RandoDataset(local_config.real_datasets_basepath, "tom.csv"),
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers)
-        else:
-            print(f"[kpest_trainer] Skipping test set — tom.csv not found at {tom_csv_path}")
+    dataloader_train = make_hot3d_loader(train_dirs, shuffle=True, drop_last=True)
+    dataloader_val = make_hot3d_loader(val_dirs, shuffle=False, drop_last=False)
 
     model = KeyNet.KeyNet()
     load_keynet_weights(model)
@@ -279,7 +293,13 @@ def main():
 
     # Use an absolute path so checkpoints are always written to the same place
     # regardless of what directory SLURM starts the job from.
-    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
+    # Smoke-test runs get their own checkpoint directory. Otherwise a
+    # loadfast run would write checkpoint.pth into the real one, and the
+    # resume block just below would silently pick up a model trained on two
+    # sequences at the start of the next real run.
+    checkpoint_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "checkpoints_loadfast" if header.env_settings.loadfast else "checkpoints")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
@@ -293,17 +313,13 @@ def main():
         except BaseException:
             print("Couldn't load optimizer state dict! This shouldn't happen except for right after model weight transfers!")
 
-    for epoch in range(start_epoch, 2000000000000):
+    epochs_without_improvement = 0
+
+    for epoch in range(start_epoch, MAX_EPOCHS):
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
         set_train_mode(model)
         train_loop(device, dataloader_train, model, optimizer)
-
-        # Skip validation and checkpointing when in fast/debug mode — model is
-        # only trained on a tiny slice of data and isn't worth keeping, and
-        # dataloader_val is None (real datasets weren't loaded, see above).
-        if header.env_settings.loadfast:
-            continue
 
         model.eval()
         val_result = validatoor.validation_loop(
@@ -314,9 +330,19 @@ def main():
         is_best = mean_validation_loss < best_validation_loss
         if is_best:
             best_validation_loss = mean_validation_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
-        print(f'Done with epoch {epoch} — val loss: {mean_validation_loss:.4f} (best: {best_validation_loss:.4f})')
-        wandb.log({"val_loss": mean_validation_loss, "best_val_loss": best_validation_loss})
+        print(f"Done with epoch {epoch} -- val loss: {mean_validation_loss:.4f} "
+              f"(best: {best_validation_loss:.4f}; "
+              f"{epochs_without_improvement}/{EARLY_STOPPING_PATIENCE} epochs "
+              f"without improvement)")
+        wandb.log({
+            "val_loss": mean_validation_loss,
+            "best_val_loss": best_validation_loss,
+            "epochs_without_improvement": epochs_without_improvement,
+        })
 
         save_checkpoint({
             'epoch': epoch,
@@ -332,26 +358,27 @@ def main():
                 os.path.join(checkpoint_dir, f"checkpoint_{epoch}.pth"))
 
         if is_best:
-            print(f"Best model so far! Saving as checkpoint_best.pth")
+            print("Best model so far! Saving as checkpoint_best.pth")
             shutil.copy(
                 os.path.join(checkpoint_dir, "checkpoint.pth"),
                 os.path.join(checkpoint_dir, "checkpoint_best.pth"))
 
-    # Run the test set once after training is complete.
-    # The test set is never seen during training or used for checkpoint selection,
-    # so this gives an unbiased measure of final model performance.
-    # (In practice the epoch loop above runs until manually stopped, so this
-    # only executes if that loop is ever given a real exit condition.)
-    if dataloader_test is not None:
-        print("Training complete. Running final test evaluation...")
-        model.eval()
-        test_result = validatoor.validation_loop(
-            device, dataloader_test, model, mse, "test", False, epoch)
+        if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+            print(f"Early stopping: validation loss has not improved for "
+                  f"{EARLY_STOPPING_PATIENCE} consecutive epochs.")
+            break
     else:
-        print("Skipping final test evaluation — tom.csv was not available.")
-    test_loss = test_result.mean_loss_no_pred
-    print(f"Final test loss: {test_loss:.4f}")
-    wandb.log({"test_loss": test_loss})
+        print(f"Reached the MAX_EPOCHS ceiling of {MAX_EPOCHS} without "
+              f"early stopping triggering.")
+
+    # No test evaluation here by design -- see the data section above.
+    best_checkpoint = os.path.join(checkpoint_dir, "checkpoint_best.pth")
+    print(f"\nTraining complete. Best validation loss: {best_validation_loss:.4f}")
+    print(f"Best checkpoint: {best_checkpoint}")
+    print("Score it against the held-out splits with, e.g.:")
+    print(f"  python py/training/keypoint/evaluate_keypoint.py "
+          f"--weights {best_checkpoint} --split test_aria")
+    wandb.log({"final_best_val_loss": best_validation_loss})
 
 
 if __name__ == "__main__":
