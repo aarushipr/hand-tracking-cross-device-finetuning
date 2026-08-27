@@ -44,7 +44,15 @@ EARLY_STOPPING_PATIENCE = 8
 # Keep every Nth frame of each HOT3D recording. The cameras run at 30 Hz, so
 # consecutive frames are near-duplicates -- see HOT3DKeypointDataset's
 # docstring for the full reasoning.
-HOT3D_FRAME_STRIDE = 10
+#
+# 5, not 10: KeyNet fine-tunes 830,016 trainable parameters (the frozen
+# image_network is only 16.3% of the network), so the ratio of trainable
+# parameters to training samples is the weakest point in the procedure.
+# Stride 5 roughly doubles the training set for the same parameter count,
+# at ~1.5 h/epoch against the 72 h job limit -- affordable, and it directly
+# addresses the overfitting risk. Raise back to 10 if epoch time turns out
+# materially worse than that in practice.
+HOT3D_FRAME_STRIDE = 5
 
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
@@ -325,7 +333,12 @@ def main():
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
         set_train_mode(model)
-        train_loop(device, dataloader_train, model, optimizer)
+        # Capture the epoch-mean training loss and log it alongside the
+        # validation loss. Without this only per-batch training loss reaches
+        # wandb, which is too noisy to plot against a per-epoch validation
+        # curve -- and train-versus-validation on shared axes is exactly the
+        # figure that shows whether the trainable head overfits.
+        mean_training_loss = train_loop(device, dataloader_train, model, optimizer)
 
         model.eval()
         val_result = validatoor.validation_loop(
@@ -340,11 +353,13 @@ def main():
         else:
             epochs_without_improvement += 1
 
-        print(f"Done with epoch {epoch} -- val loss: {mean_validation_loss:.4f} "
+        print(f"Done with epoch {epoch} -- train loss: {mean_training_loss:.4f}, "
+              f"val loss: {mean_validation_loss:.4f} "
               f"(best: {best_validation_loss:.4f}; "
               f"{epochs_without_improvement}/{EARLY_STOPPING_PATIENCE} epochs "
               f"without improvement)")
         wandb.log({
+            "train_loss": mean_training_loss,
             "val_loss": mean_validation_loss,
             "best_val_loss": best_validation_loss,
             "epochs_without_improvement": epochs_without_improvement,

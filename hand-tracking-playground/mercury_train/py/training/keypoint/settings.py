@@ -27,10 +27,30 @@ depth_loss_mul = 0.03
 existence_loss_mul = 0.0
 
 # which direction elbow is pointing
-elbow_loss_mul = 0.001
+#
+# Zero for HOT3D fine-tuning, for the same reason as existence_loss_mul
+# above: HOT3D carries no body-pose data, so HOT3DKeypointDataset supplies
+# a zero vector meaning "no supervision available for this output".
+#
+# That intent is NOT expressed by the masking in kpest_trainer.py, which
+# derives has_elbow_curls from has_depth. That coupling was sound when the
+# only two data sources were RandoData (no depth, no elbow/curls) and
+# ArtificialData (both), so depth implied elbow/curls. HOT3D is a third
+# case the assumption never anticipated: real depth, no elbow, no curls.
+# Left at 0.001 the trainer would therefore read those zero vectors as
+# ground truth and drive the elbow head toward always predicting zero on
+# every real sample, degrading it away from its Monado initialisation.
+#
+# Zeroing the multiplier here leaves the elbow head at its pretrained
+# value and leaves the shared masking logic untouched.
+elbow_loss_mul = 0.0
 
 # how curled the fingers are
-curls_loss_mul = 0.00001
+#
+# Zero for HOT3D fine-tuning, same reasoning as elbow_loss_mul directly
+# above -- HOT3D provides no finger-curl ground truth, so the zeros
+# supplied by the dataset mean "unavailable", not "the answer is zero".
+curls_loss_mul = 0.0
 
 # confidence (variance) of curl prediction
 curl_min_variance = 0.01
