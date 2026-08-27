@@ -166,7 +166,10 @@ def build_model(weights, device):
         load_keynet_weights(model)
         source = "monado (zero-shot, no fine-tuning)"
     else:
-        checkpoint = torch.load(weights, map_location="cpu")
+        # weights_only=False -- see kpest_trainer.py. Checkpoints written by
+        # this project, loaded by this project; the 2.6 default would reject
+        # them for containing a plain Python/numpy scalar.
+        checkpoint = torch.load(weights, map_location="cpu", weights_only=False)
         # Checkpoints are written from model.module.state_dict(), so the keys
         # carry no "module." prefix.
         state_dict = checkpoint.get("state_dict", checkpoint)

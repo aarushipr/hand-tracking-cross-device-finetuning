@@ -317,7 +317,13 @@ def main():
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
-        checkpoint = torch.load(checkpoint_file, map_location=torch.device(device))
+        # weights_only=False: PyTorch 2.6 flipped this default to True, which
+        # refuses any checkpoint containing a non-tensor object -- including
+        # the numpy scalar that best_validation_loss used to be. These are
+        # checkpoints this script wrote itself, not untrusted files, so the
+        # restriction buys nothing here and breaks resume-after-preemption.
+        checkpoint = torch.load(checkpoint_file, map_location=torch.device(device),
+                                weights_only=False)
         if 'best_validation_loss' in checkpoint:
             best_validation_loss = checkpoint['best_validation_loss']
         start_epoch = checkpoint['epoch']
@@ -369,7 +375,10 @@ def main():
             'epoch': epoch,
             'state_dict': model.module.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'best_validation_loss': best_validation_loss,
+            # float(), not the numpy scalar np.mean() returns: keeping the
+            # checkpoint free of numpy objects means it also loads under
+            # torch.load's stricter weights_only=True default.
+            'best_validation_loss': float(best_validation_loss),
         }, checkpoint_dir)
 
         if epoch % 10 == 0:
