@@ -62,6 +62,14 @@ def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
 
 def train_loop(device, dataloader, model, optimizer):
     total_loss = 0
+    # Accumulated separately from total_loss so the epoch mean of the xy term
+    # alone can be logged. validatoor's validation loss is the xy heatmap term
+    # ONLY (see validation_loop_just_one: loss_array holds loss_hmap), whereas
+    # total_loss here is the full objective, xy + depth_loss_mul * depth. The
+    # two are therefore not comparable, and plotting them against each other
+    # as "training vs validation loss" would compare an objective against one
+    # of its own components. train_loss_xy is the like-for-like counterpart.
+    total_loss_xy = 0
     loss_divisor = 0
     l = len(dataloader)
 
@@ -131,6 +139,7 @@ def train_loop(device, dataloader, model, optimizer):
         loss = loss_xy + loss_depth + loss_existence + loss_elbow + loss_curls
 
         total_loss += float(loss)
+        total_loss_xy += float(loss_xy)
 
         loss.backward()
         optimizer.step()
@@ -179,10 +188,11 @@ def train_loop(device, dataloader, model, optimizer):
         loss_divisor += 1
 
     avg_loss = total_loss / loss_divisor
+    avg_loss_xy = total_loss_xy / loss_divisor
 
     print(
-        f"Avg loss this epoch: {avg_loss}")
-    return avg_loss
+        f"Avg loss this epoch: {avg_loss} (xy term alone: {avg_loss_xy})")
+    return avg_loss, avg_loss_xy
 
 def set_train_mode(model):
     model.train()
@@ -344,7 +354,8 @@ def main():
         # wandb, which is too noisy to plot against a per-epoch validation
         # curve -- and train-versus-validation on shared axes is exactly the
         # figure that shows whether the trainable head overfits.
-        mean_training_loss = train_loop(device, dataloader_train, model, optimizer)
+        mean_training_loss, mean_training_loss_xy = train_loop(
+            device, dataloader_train, model, optimizer)
 
         model.eval()
         val_result = validatoor.validation_loop(
@@ -359,13 +370,18 @@ def main():
         else:
             epochs_without_improvement += 1
 
-        print(f"Done with epoch {epoch} -- train loss: {mean_training_loss:.4f}, "
+        print(f"Done with epoch {epoch} -- train loss: {mean_training_loss:.4f} "
+              f"(xy {mean_training_loss_xy:.4f}), "
               f"val loss: {mean_validation_loss:.4f} "
               f"(best: {best_validation_loss:.4f}; "
               f"{epochs_without_improvement}/{EARLY_STOPPING_PATIENCE} epochs "
               f"without improvement)")
         wandb.log({
+            # train_loss is the full objective; train_loss_xy is the term that
+            # is directly comparable to val_loss. Plot train_loss_xy against
+            # val_loss for the convergence/overfitting figure.
             "train_loss": mean_training_loss,
+            "train_loss_xy": mean_training_loss_xy,
             "val_loss": mean_validation_loss,
             "best_val_loss": best_validation_loss,
             "epochs_without_improvement": epochs_without_improvement,
