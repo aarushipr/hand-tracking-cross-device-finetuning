@@ -160,10 +160,10 @@ def decode_depth(hmaps):
 
 def build_model(weights, device):
     model = KeyNet.KeyNet()
+    # Needed for both branches: this is what gives the InvertedResidual convs (bias=False) real bias params, matching what kpest_trainer.py does before training/checkpointing.
+    load_keynet_weights(model)
 
     if weights == "monado":
-        # The unmodified upstream Monado weights -- the zero-shot baseline.
-        load_keynet_weights(model)
         source = "monado (zero-shot, no fine-tuning)"
     else:
         # weights_only=False -- see kpest_trainer.py. Checkpoints written by
