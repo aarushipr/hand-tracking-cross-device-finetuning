@@ -195,15 +195,25 @@ def sequence_dirs_for_split(split):
 
 def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None):
     """
-    Returns a dict of metrics. Joints whose ground truth falls outside the
-    128x128 crop are excluded: their Gaussian would sit off the heatmap grid
-    entirely, so no prediction could match them and scoring against them
-    measures nothing.
+    Returns a dict of metrics. A joint is excluded from scoring if its
+    ground truth falls outside the 128x128 crop (its Gaussian would sit off
+    the heatmap grid entirely, so no prediction could match it), or if
+    HOT3DKeypointDataset itself marked that joint invalid at index time
+    (behind the camera, or outside the camera model's valid region -- see
+    HOT3DKeypointDataset._project_hand). The second check matters as of
+    index format version 3: an invalid joint's ground truth position is a
+    geometry-safe placeholder used only to keep cropping stable, not a real
+    measurement, and that placeholder can land inside the crop, so the
+    crop check alone is no longer enough to keep it out of the score.
+    Depth is additionally gated on depth_valid_per_joint, since a joint can
+    be a usable 2D position while its depth is still undefined (see
+    _project_hand's note on the wrist/middle-proximal anchor dependency).
     """
     errors = []          # per-joint 2D error, pixels
     depth_errors = []    # per-joint depth error, relative-depth units
     floor_errors = []    # per-joint decoder error on ground-truth heatmaps
     joint_masks = []
+    depth_joint_masks = []
 
     n_samples = 0
     n_degenerate = 0
@@ -222,6 +232,8 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
             gt_locs = doct["gt_joint_locs"].to(device)          # (B, 21, 3)
             gt_xy_hmap = doct["gt_xy"].to(device).float()
             gt_depth_hmap = doct["gt_depth"].to(device).float()
+            xy_valid_per_joint = doct["xy_valid_per_joint"].to(device).bool()
+            depth_valid_per_joint = doct["depth_valid_per_joint"].to(device).bool()
 
             pred_kp = doct["input_predicted_keypoints"].to(device).float()
             pred_valid = doct["input_predicted_keypoints_valid"].to(device).float()
@@ -247,7 +259,8 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
                 continue
 
             in_crop = ((gt_px >= 0) & (gt_px < CROP_SIDE_PX)).all(dim=-1)
-            mask = in_crop & sample_ok.unsqueeze(-1)           # (B, 21)
+            mask = in_crop & sample_ok.unsqueeze(-1) & xy_valid_per_joint  # (B, 21)
+            depth_mask = mask & depth_valid_per_joint
 
             pred_px = decode_xy(model_xy)
             pred_z = decode_depth(model_depth)
@@ -257,6 +270,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
             floor_errors.append(torch.linalg.norm(floor_px - gt_px, dim=-1).cpu())
             depth_errors.append((pred_z - gt_z).abs().cpu())
             joint_masks.append(mask.cpu())
+            depth_joint_masks.append(depth_mask.cpu())
 
     if not errors:
         raise RuntimeError("No usable samples in this split.")
@@ -265,11 +279,13 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
     floor = torch.cat(floor_errors).numpy()
     derr = torch.cat(depth_errors).numpy()
     mask = torch.cat(joint_masks).numpy()
+    depth_mask = torch.cat(depth_joint_masks).numpy()
 
     m = mask.reshape(-1)
+    dm = depth_mask.reshape(-1)
     e = err.reshape(-1)[m]
     f = floor.reshape(-1)[m]
-    d = derr.reshape(-1)[m]
+    d = derr.reshape(-1)[dm]
 
     per_joint = []
     for joint in range(err.shape[1]):

@@ -89,19 +89,22 @@ def train_loop(device, dataloader, model, optimizer):
 
         has_depth = has_depth * gt_is_hand
 
-        # batch_size x 1 x 1
-        has_depth_expanded = has_depth[:, None, None]
-
         # No, this isn't a bug. Currently (dec 31 2022) we only have
         # "RandoData" which is always (21,2) and no elbow and "ArtificialData"
         # which has everything.
         has_elbow_curls = has_depth[:, None]
 
+        # Per-joint validity (see HOT3DKeypointDataset._project_hand): a
+        # hand can have some joints usable and others not, so xy and depth
+        # get masked per joint here instead of once for the whole sample.
+        # batch_size x 21 x 1
+        depth_valid_per_joint = doct['depth_valid_per_joint'].to(device)
+        has_depth_expanded = (depth_valid_per_joint * gt_is_hand[:, None])[:, :, None]
+
         gt_xy = doct['gt_xy'].to(device)
-        has_xy = doct['has_xy'].to(device)
-        has_xy = has_xy * gt_is_hand
-        # batch_size x 1 x 1 x 1
-        has_xy_expanded = has_xy[:, None, None, None]
+        # batch_size x 21 x 1 x 1
+        xy_valid_per_joint = doct['xy_valid_per_joint'].to(device)
+        has_xy_expanded = (xy_valid_per_joint * gt_is_hand[:, None])[:, :, None, None]
 
         gt_elbow = doct["elbow"].to(device)
 

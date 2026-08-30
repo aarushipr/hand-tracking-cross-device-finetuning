@@ -49,12 +49,17 @@ def validation_loop_just_one(
             # is comparable. has_depth is 0 for datasets without depth labels —
             # without this mask, those samples would incorrectly penalise the
             # model on their zero-depth ground truth values.
-            has_depth = has_depth * gt_is_hand
-            has_depth_expanded = has_depth[:, None, None]
+            #
+            # Per-joint validity (see HOT3DKeypointDataset._project_hand): a
+            # hand can have some joints usable and others not, so xy and
+            # depth get masked per joint, matching kpest_trainer.py's
+            # train_batch exactly so train and validation loss stay
+            # comparable.
+            depth_valid_per_joint = doct['depth_valid_per_joint'].to(device)
+            has_depth_expanded = (depth_valid_per_joint * gt_is_hand[:, None])[:, :, None]
 
-            has_xy = doct['has_xy'].to(device)
-            has_xy = has_xy * gt_is_hand
-            has_xy_expanded = has_xy[:, None, None, None]
+            xy_valid_per_joint = doct['xy_valid_per_joint'].to(device)
+            has_xy_expanded = (xy_valid_per_joint * gt_is_hand[:, None])[:, :, None, None]
 
             if not use_prediction:
                 input_predicted_keypoints = torch.zeros(

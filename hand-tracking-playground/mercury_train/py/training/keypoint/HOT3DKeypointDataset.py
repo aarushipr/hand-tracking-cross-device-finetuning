@@ -34,8 +34,8 @@ elbow/curls are unconditionally zeroed -- HOT3D has no body-pose data to
 derive them from.
 
 
-WHY THE INDEX HOLDS PROJECTED KEYPOINTS (format version 2)
-----------------------------------------------------------
+WHY THE INDEX HOLDS PROJECTED KEYPOINTS AND PER-JOINT VALIDITY
+----------------------------------------------------------------
 Version 1 of this index admitted a sample whenever its 2D bounding box
 cleared min_visibility_ratio, and only discovered later -- inside
 __getitem__, with nothing useful left to do about it -- that some of the
@@ -48,27 +48,41 @@ example but a mislabelled positive: a black image asserting that a hand
 was present at 21 coincident points. Training on it would have actively
 taught the network that blank images contain hands.
 
-So the full projection now happens during index construction, and an entry
-is emitted only if every joint projects successfully. Three consequences:
+Version 2 fixed the mislabelling by moving the full projection into index
+construction and rejecting a hand outright if any single joint failed.
+That is correct but wasteful: a hand failing on one fingertip still has
+20 perfectly good joints worth training on.
 
-1. No placeholder samples reach training at all.
-2. Roughly 40% fewer image reads, because the invalid entries no longer
-   exist to be fetched. Index building itself reads no image data, only
-   poses and calibration, so this validity check is nearly free.
+Version 3 (current) keeps per-joint validity instead of collapsing it to
+one pass/fail decision for the whole hand. Each entry carries a (21,2)
+array of (xy_valid, depth_valid) alongside its keypoints. A hand is
+rejected outright only if literally no joint is usable; otherwise it is
+kept, with __getitem__ masking each invalid joint out of its specific
+loss term (see xy_valid_per_joint / depth_valid_per_joint) instead of
+discarding the whole sample. See _project_hand for why depth validity
+additionally depends on the wrist and middle-proximal joints specifically.
+
+Three consequences carried over from version 2 still hold:
+
+1. No mislabelled placeholder samples reach training.
+2. Index building itself reads no image data, only poses and calibration,
+   so the validity check is nearly free regardless of how many joints it
+   inspects.
 3. __getitem__ reduces to: read image, crop, augment. Every pose lookup
    and projection is precomputed and cached, so the per-sample cost is
    now dominated purely by the .vrs image read.
 
 The residual _empty_sample() path (a genuinely unreadable image) is now
-rare, and is labelled is_hand=0 / has_xy=0 / has_depth=0 so it contributes
-no gradient at all rather than a wrong one.
+rare, and is labelled is_hand=0 / has_xy=0 / has_depth=0, with every
+per-joint flag also 0, so it contributes no gradient at all rather than a
+wrong one.
 
 
 SAMPLE INDEX, CACHING, AND FRAME STRIDE
 ---------------------------------------
 The index deliberately holds only plain data -- sequence, image stream,
-timestamp, handedness, and the 21x3 projected keypoints -- and never a
-live provider object. An earlier version stored the open
+timestamp, handedness, the 21x3 projected keypoints, and a 21x2
+per-joint validity flag -- and never a live provider object. An earlier version stored the open
 Hot3dDataProvider in every sample tuple, which forced every sequence's
 .vrs to be opened before training could begin and made the index
 impossible to serialise. Over the cluster's network storage that cost
@@ -130,7 +144,11 @@ from a_aug_config import aug_config_validatoor
 # then ignored rather than silently reused.
 #   1 -> box-visibility gate only; invalid projections became blank samples
 #   2 -> full projection validity gate at index time; keypoints cached
-INDEX_FORMAT_VERSION = 2
+#   3 -> per-joint validity retained instead of rejecting the whole hand on
+#        any single joint failure; a hand is now dropped only if literally
+#        no joint is usable. Adds a (21,2) per-joint (xy_valid, depth_valid)
+#        array to the cached index.
+INDEX_FORMAT_VERSION = 3
 
 
 # Guards get_pose_at_timestamp against the spurious 0ns sentinel found in
@@ -234,7 +252,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         if self.index_cache_dir:
             os.makedirs(self.index_cache_dir, exist_ok=True)
 
-        seq_idx, stream_str, ts, is_right, kps = [], [], [], [], []
+        seq_idx, stream_str, ts, is_right, kps, valid = [], [], [], [], [], []
         n_candidates = 0
 
         for i, seq_dir in enumerate(self.sequence_dirs):
@@ -246,6 +264,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                 ts.append(e[1])
                 is_right.append(e[2])
                 kps.append(e[3])
+                valid.append(e[4])
 
         self._seq_idx = np.asarray(seq_idx, dtype=np.int32)
         self._stream_str = np.asarray(stream_str, dtype=np.str_)
@@ -253,6 +272,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         self._is_right = np.asarray(is_right, dtype=bool)
         self._kps = (np.asarray(kps, dtype=np.float32).reshape(-1, 21, 3)
                      if kps else np.zeros((0, 21, 3), dtype=np.float32))
+        self._valid = (np.asarray(valid, dtype=bool).reshape(-1, 21, 2)
+                       if valid else np.zeros((0, 21, 2), dtype=bool))
 
         self.actual_size = len(self._ts)
         self.num_times_to_repeat = 1
@@ -263,7 +284,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             print(f"[HOT3DKeypointDataset] {self.actual_size} samples from "
                   f"{len(self.sequence_dirs)} sequences "
                   f"({self.n_rejected_by_projection} of {n_candidates} candidates "
-                  f"rejected, {pct:.1f}%, joints outside the camera model)")
+                  f"rejected, {pct:.1f}%, no joint at all usable; remaining "
+                  f"samples may still have individual joints masked out)")
 
     # ------------------------------------------------------------------
     # Sample index: build, cache, load
@@ -280,9 +302,11 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
     def _index_for_sequence(self, seq_dir):
         """
         Returns (entries, n_candidates), where each entry is
-        (stream_id_str, timestamp_ns, is_right, keypoints_px_and_depth).
+        (stream_id_str, timestamp_ns, is_right, keypoints_px_and_depth,
+        per_joint_valid), and per_joint_valid is a (21,2) bool array of
+        (xy_valid, depth_valid) for that hand's 21 joints.
         n_candidates counts hands that passed the box-visibility gate,
-        including those later rejected for failing to project.
+        including those later rejected for having no usable joint at all.
         """
         cache_path = self._cache_path(seq_dir)
 
@@ -294,6 +318,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                         z["ts"].tolist(),
                         z["is_right"].tolist(),
                         list(z["kps"]),
+                        list(z["valid"]),
                     ))
                     return entries, int(z["n_candidates"])
             except (OSError, ValueError, KeyError) as e:
@@ -316,12 +341,15 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         try:
             kps = (np.asarray([e[3] for e in entries], dtype=np.float32)
                    if entries else np.zeros((0, 21, 3), dtype=np.float32))
+            valid = (np.asarray([e[4] for e in entries], dtype=bool)
+                     if entries else np.zeros((0, 21, 2), dtype=bool))
             np.savez(
                 tmp_path,
                 stream_str=np.asarray([e[0] for e in entries], dtype=np.str_),
                 ts=np.asarray([e[1] for e in entries], dtype=np.int64),
                 is_right=np.asarray([e[2] for e in entries], dtype=bool),
                 kps=kps.reshape(-1, 21, 3),
+                valid=valid.reshape(-1, 21, 2),
                 n_candidates=np.asarray(n_candidates, dtype=np.int64),
             )
             os.replace(f"{tmp_path}.npz", cache_path)
@@ -339,36 +367,57 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                       T_device_camera, camera_calibration):
         """
         World-space (21,3) landmarks -> (21,3) of [x_px, y_px, relative_depth],
-        or None if any joint falls behind the camera or outside the camera
-        model's valid region. Returning None here -- at index time -- is the
-        whole point of format version 2: the sample is simply never emitted.
+        plus two (21,) validity masks (xy_valid, depth_valid), or None if not
+        even one joint is usable.
+
+        A joint is xy-invalid if it falls behind the camera or outside the
+        camera model's valid region; its x_px/y_px are left at 0 here and
+        must not be trained on directly -- see __getitem__, which substitutes
+        a geometry-safe placeholder before cropping, and xy_valid_per_joint,
+        which keeps it out of the loss regardless of that placeholder value.
+
+        Depth is relative to the middle-proximal joint (index 9) and scaled
+        by the wrist-to-middle-pxm "hand size" (see module docstring), so
+        every joint's depth additionally requires BOTH the wrist (index 0)
+        and the middle-proximal joint (index 9) to themselves be xy-valid.
+        If either of those two fails, no joint's depth is computable that
+        frame, not only the joints that individually failed.
         """
         camera_points = np.zeros((21, 3), dtype=np.float32)
         for i in range(21):
             camera_points[i] = world_point_to_camera_frame(
                 world_keypoints[i], T_world_device, T_device_camera)
 
-        if np.any(camera_points[:, 2] <= 0):
-            return None  # a joint landed behind the camera
-
+        xy_valid = camera_points[:, 2] > 0
         out = np.zeros((21, 3), dtype=np.float32)
         for i in range(21):
+            if not xy_valid[i]:
+                continue
             pixel = camera_calibration.project(camera_points[i])
             if pixel is None:
-                return None  # outside the camera model's valid region
+                xy_valid[i] = False
+                continue
             out[i, :2] = pixel
+
+        if not xy_valid.any():
+            return None  # nothing usable in this hand at all
 
         # Relative depth, matching ArtificialData's native convention exactly
         # (see module docstring): each joint's full 3D distance from the
         # camera, minus the middle-proximal joint's own distance from the
-        # camera, divided by the wrist-to-middle-pxm "hand size".
-        hand_size = np.linalg.norm(world_keypoints[0] - world_keypoints[9])
-        if hand_size <= 0:
-            return None
-        midpxm_depth = np.linalg.norm(camera_points[9])
-        joint_distances = np.linalg.norm(camera_points, axis=1)
-        out[:, 2] = (joint_distances - midpxm_depth) / hand_size
-        return out
+        # camera, divided by the wrist-to-middle-pxm "hand size". Both anchor
+        # joints (wrist, middle-proximal) must themselves be xy-valid, or no
+        # joint's depth is computable this frame.
+        depth_valid = np.zeros(21, dtype=bool)
+        if xy_valid[0] and xy_valid[9]:
+            hand_size = np.linalg.norm(world_keypoints[0] - world_keypoints[9])
+            if hand_size > 0:
+                midpxm_depth = np.linalg.norm(camera_points[9])
+                joint_distances = np.linalg.norm(camera_points, axis=1)
+                out[:, 2] = (joint_distances - midpxm_depth) / hand_size
+                depth_valid = xy_valid.copy()
+
+        return out, xy_valid, depth_valid
 
     def _build_index_for_sequence(self, seq_dir):
         TimeDomain = self._TimeDomain
@@ -441,14 +490,17 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                     world_keypoints = hot3d_landmarks_to_project_keypoints(
                         landmarks.detach().cpu().numpy())
 
-                    projected = self._project_hand(
+                    projection = self._project_hand(
                         world_keypoints, T_world_device,
                         T_device_camera, camera_calibration)
-                    if projected is None:
+                    if projection is None:
                         continue
+                    proj_kps, xy_valid, depth_valid = projection
+                    per_joint_valid = np.stack([xy_valid, depth_valid], axis=1)
 
                     entries.append((str(stream_id), int(ts),
-                                    bool(hand_pose_data.is_right_hand), projected))
+                                    bool(hand_pose_data.is_right_hand),
+                                    proj_kps, per_joint_valid))
 
         return entries, n_candidates
 
@@ -529,14 +581,26 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         ts = int(self._ts[idx])
         is_right = bool(self._is_right[idx])
         keypoints_px_and_depth = self._kps[idx].copy()
+        xy_valid_per_joint = self._valid[idx, :, 0].copy()
+        depth_valid_per_joint = self._valid[idx, :, 1].copy()
+
+        # Joints that failed projection have no real position (see
+        # _project_hand). Substitute the average of this hand's own valid
+        # joints, purely so the crop-selection geometry below -- which looks
+        # at all 21 points together -- isn't thrown off by a meaningless
+        # outlier value. This substitute is never used as a training target:
+        # xy_valid_per_joint / depth_valid_per_joint mask it out of the loss
+        # regardless of what value ends up here.
+        if not xy_valid_per_joint.all():
+            valid_mean_xy = keypoints_px_and_depth[xy_valid_per_joint, :2].mean(axis=0)
+            keypoints_px_and_depth[~xy_valid_per_joint, :2] = valid_mean_xy
 
         bundle = self._providers_for(seq_dir)
         stream_id = bundle.stream_id_by_str[stream_str]
 
         image = bundle.device_data_provider.get_image(ts, stream_id)
         if image is None:
-            # Rare since format version 2 -- every other failure mode is now
-            # caught at index time.
+            # Rare -- every other failure mode is now caught at index time.
             return self._empty_sample()
 
         # Same cropping approach as RandoDataset: derive the crop from a
@@ -564,17 +628,20 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             is_right=is_right)
         ret["elbow"] = torch.zeros(3).float()
         ret["curls"] = torch.zeros(5).float()
+        ret["xy_valid_per_joint"] = xy_valid_per_joint.astype(np.float32)
+        ret["depth_valid_per_joint"] = depth_valid_per_joint.astype(np.float32)
         return ret
 
     def _empty_sample(self):
         """
         Placeholder for an unreadable image.
 
-        Flagged is_hand=0 / has_xy=0 / has_depth=0 so every loss term masks
-        it out and it contributes no gradient. Version 1 of this class left
-        is_hand=1, which made each placeholder a mislabelled POSITIVE -- a
-        black image asserting a hand was present at 21 coincident points.
-        That is not a negative training example, it is a wrong one.
+        Flagged is_hand=0 / has_xy=0 / has_depth=0, with every per-joint
+        validity flag also 0, so every loss term masks it out and it
+        contributes no gradient. Version 1 of this class left is_hand=1,
+        which made each placeholder a mislabelled POSITIVE -- a black image
+        asserting a hand was present at 21 coincident points. That is not a
+        negative training example, it is a wrong one.
 
         Note this is still not a useful negative even so: a genuine negative
         would be a crop of a real frame containing no hand. Hand presence is
@@ -592,6 +659,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         ret["has_depth"] = np.float32(0)
         ret["elbow"] = torch.zeros(3).float()
         ret["curls"] = torch.zeros(5).float()
+        ret["xy_valid_per_joint"] = np.zeros(21, dtype=np.float32)
+        ret["depth_valid_per_joint"] = np.zeros(21, dtype=np.float32)
         return ret
 
 
