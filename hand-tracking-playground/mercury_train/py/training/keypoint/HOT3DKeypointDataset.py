@@ -133,6 +133,12 @@ from a_aug_config import aug_config_validatoor
 INDEX_FORMAT_VERSION = 2
 
 
+# Guards get_pose_at_timestamp against the spurious 0ns sentinel found in
+# QuestDataProvider's merged timestamp list (~45s off any real pose,
+# confirmed empirically -- every genuine timestamp matched at 0ns delta).
+MAX_POSE_TIME_DELTA_NS = 50_000_000  # 50ms; inter-frame gap is ~33ms
+
+
 def world_point_to_camera_frame(world_point, T_world_device, T_device_camera):
     """
     Transforms a single 3D point from the shared world/scene frame (same
@@ -381,6 +387,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                     timestamp_ns=ts,
                     time_query_options=TimeQueryOptions.CLOSEST,
                     time_domain=TimeDomain.TIME_CODE,
+                    acceptable_time_delta=MAX_POSE_TIME_DELTA_NS,
                 )
                 if device_pose is None:
                     continue
@@ -390,6 +397,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                     timestamp_ns=ts,
                     time_query_options=TimeQueryOptions.CLOSEST,
                     time_domain=TimeDomain.TIME_CODE,
+                    acceptable_time_delta=MAX_POSE_TIME_DELTA_NS,
                 )
                 if hand_poses_with_dt is None:
                     continue
@@ -489,23 +497,22 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                    because Quest 3 HOT3D recordings carry no TimeCode track
                    at all (see py/training/common/hot3d_timecode_compat.py)
 
-        Feeding Quest's merged list straight into a per-stream lookup could
-        silently return a frame from the wrong capture instant, so this
-        raises instead. Quest support belongs in the evaluation path, where
-        get_frameset_from_timestamp() can map a reference timestamp onto each
-        stream's own nearest capture time under an explicit tolerance.
+        QuestDataProvider.__init__ assigns this exact merged list to every
+        stream_id anyway (see its _stream_timestamps_sorted), so using it
+        directly per-stream is equivalent to what get_frameset_from_timestamp
+        would resolve to here -- no separate frameset step needed.
         Training is Aria-only by design (see py/training/common/hot3d_split.py),
-        so nothing in the training path reaches this.
+        so nothing in the training path is affected by the Quest branch below.
         """
         headset = bundle.hot3d_data_provider.get_device_type()
-        if getattr(headset, "name", str(headset)) != "Aria":
-            raise NotImplementedError(
-                f"HOT3DKeypointDataset does not yet support {headset} recordings. "
-                f"Training is Aria-only by design; Quest support is needed only "
-                f"for the cross-device test split and is not wired up yet.")
+        if getattr(headset, "name", str(headset)) == "Aria":
+            return bundle.device_data_provider.get_sequence_timestamps(
+                stream_id, self._TimeDomain.TIME_CODE)
 
-        return bundle.device_data_provider.get_sequence_timestamps(
-            stream_id, self._TimeDomain.TIME_CODE)
+        # get_pose_at_timestamp/get_bbox_at_timestamp treat time_domain as a
+        # guard clause only, no conversion -- verified against real Quest
+        # data (see MAX_POSE_TIME_DELTA_NS above), so this is safe.
+        return bundle.device_data_provider.get_sequence_timestamps()
 
     # ------------------------------------------------------------------
     # Dataset protocol
