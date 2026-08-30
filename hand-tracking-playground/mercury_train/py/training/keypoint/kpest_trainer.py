@@ -33,7 +33,7 @@ gnll = nn.GaussianNLLLoss(reduction='none')
 # --- Fine-tuning schedule (Chapter 4, Table 4.1) ---------------------------
 # Hard ceiling on epochs. Training normally stops earlier, through the
 # early-stopping patience below; this only bounds the SLURM job.
-MAX_EPOCHS = 80
+MAX_EPOCHS = 120
 
 # Stop after this many consecutive epochs with no improvement in validation
 # loss. Deliberately generous: the validation split is a handful of HOT3D

@@ -9,7 +9,7 @@
 #   own Hot3dDataProvider per sequence, so provider memory scales with the
 #   worker count. Watch `seff <jobid>` after the first run and trim if the
 #   headroom turns out to be large.
-#SBATCH --time=3-00:00:00
+#SBATCH --time=4-00:00:00
 # ↑ verified 2026-08-26, not guessed: partition NORMAL has
 #   MaxTime=14-00:00:00 and DefaultTime=08:00:00, and QOS `stud` sets no
 #   MaxWall (`scontrol show partition`, `sacct -j 1590166`). The old
