@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=4
 # ↑ chair SLURM policy: no more than 4 CPU cores per GPU requested.
 #SBATCH --gres=gpu:1,VRAM:24G
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 # ↑ raised from 32G: with num_workers=4 each DataLoader worker opens its
 #   own Hot3dDataProvider per sequence, so provider memory scales with the
 #   worker count. Watch `seff <jobid>` after the first run and trim if the
