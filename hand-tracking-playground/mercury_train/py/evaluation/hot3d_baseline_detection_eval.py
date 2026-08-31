@@ -85,6 +85,8 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_THIS_DIR, "../training/detection"))
 sys.path.insert(0, os.path.join(_THIS_DIR, "../../"))  # mercury_train root, for py.training.common
 
+from py.training.common.a_geometry import normalize_grayscale_exact
+
 DETECTION_MODEL_FILENAME = "grayscale_detection_160x160.onnx"
 DETECTION_INPUT_SIZE = 160
 
@@ -184,17 +186,13 @@ def blackbar_letterbox(image, orientation=0, out_size=DETECTION_INPUT_SIZE):
 
 
 def normalize_grayscale(img_uint8):
-    """Port of hg_model.cpp's `normalizeGrayscaleImage()`. Returns float32
-    array or None if the input has zero variance (matches the C++'s
-    zero-stddev bailout)."""
-    data = img_uint8.astype(np.float32) / 255.0
-    std = float(data.std())
-    if std == 0:
-        return None
-    data = data * (0.25 / std)
-    mean = float(data.mean())
-    data = data + (0.5 - mean)
-    return data
+    """Port of hg_model.cpp's `normalizeGrayscaleImage()`. Thin wrapper
+    around the shared implementation in py.training.common.a_geometry
+    (normalize_grayscale_exact), which training also calls, so this script
+    and the training pipeline cannot silently reimplement the same math two
+    different ways again. Returns float32 array, or None if the input has
+    zero variance, matching the C++'s zero-stddev bailout exactly."""
+    return normalize_grayscale_exact(img_uint8.astype(np.float32) / 255.0)
 
 
 # ---------------------------------------------------------------------------

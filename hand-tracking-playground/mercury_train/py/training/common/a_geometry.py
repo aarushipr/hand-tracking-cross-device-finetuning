@@ -135,6 +135,25 @@ def npImgHeight(img):
     return img.shape[0]
 
 
+def normalize_grayscale_exact(img, target_mean=0.5, target_std=0.25):
+    """Exact port of hg_model.cpp's normalizeGrayscaleImage(): rescale
+    contrast so the image's standard deviation equals target_std, then
+    shift so its mean equals target_mean, recomputing the mean between the
+    two steps. Matches Monado's production runtime bit for bit, including
+    the fact that it applies no output clipping and bails out entirely,
+    returning None, on an image with exactly zero standard deviation.
+    Shared by training (normalizeGrayscaleImage below) and by
+    hot3d_baseline_detection_eval.py, so the two can no longer silently
+    drift apart the way two separately written copies previously did."""
+    img = img.astype(np.float32)
+    std = float(np.std(img))
+    if std == 0:
+        return None
+    img = img * (target_std / std)
+    img = img + (target_mean - float(np.mean(img)))
+    return img
+
+
 def normalizeGrayscaleImage(
         img,
         report=None,
@@ -142,18 +161,27 @@ def normalizeGrayscaleImage(
         target_std=0.25):
     if img.dtype == np.uint8:
         img = mat_uint8tofloat32(img)
+    # A near-zero (but not exactly zero) standard deviation is replaced with
+    # random noise before calling the exact port above, since training must
+    # always produce a usable image for every sample in a batch, unlike a
+    # one-off evaluation run, which can afford to skip a single degenerate
+    # frame instead of substituting something for it.
     std = np.std(img)
     if std < 0.0001:
         if report is not None:
             print(f"Very low contrast: {report}")
-        img = np.random.random(img.shape)
-        std = np.std(img)
-    img *= target_std / std
-    img += target_mean - np.mean(img)
+        img = np.random.random(img.shape).astype(np.float32)
 
-    np.clip(img, 0, 1)
+    result = normalize_grayscale_exact(img, target_mean=target_mean, target_std=target_std)
+    if result is None:
+        # Vanishingly unlikely after the substitution above, since real
+        # random noise essentially never has exactly zero variance, but
+        # guarded rather than allowed to propagate None into a batch.
+        result = normalize_grayscale_exact(
+            np.random.random(img.shape).astype(np.float32),
+            target_mean=target_mean, target_std=target_std)
 
-    return img
+    return result
 
 
 def draw_rectangle_in_image_px_coord(image, top, bottom, left, right, color):
