@@ -23,6 +23,22 @@ import wandb
 modelinputW = header.model_input_width
 modelinputH = header.model_input_height
 
+# --- Fine-tuning schedule (Chapter 4, Table 4.2) ---------------------------
+# Matches KeyNet's schedule (py/training/keypoint/kpest_trainer.py) so that
+# both networks are subject to the same stopping procedure, and any
+# difference in how much each benefits from fine-tuning reflects the
+# networks and data rather than a difference in training length.
+
+# Hard ceiling on epochs. Training normally stops earlier, through the
+# early-stopping patience below; this only bounds the SLURM job.
+MAX_EPOCHS = 120
+
+# Stop after this many consecutive epochs with no improvement in validation
+# loss. Deliberately generous: the validation split is a handful of HOT3D
+# sequences, so epoch-to-epoch validation loss is noisy, and a tight patience
+# would stop on that noise rather than on genuine convergence.
+EARLY_STOPPING_PATIENCE = 8
+
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
     os.makedirs(output_dir, exist_ok=True)
@@ -179,7 +195,9 @@ def main():
         model.module.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
 
-    for epoch in range(start_epoch, 200):
+    epochs_without_improvement = 0
+
+    for epoch in range(start_epoch, MAX_EPOCHS):
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
 
@@ -192,12 +210,17 @@ def main():
         is_best = False
         if val_dataloader is not None:
             val_loss = validate_epoch(device, val_dataloader, loss_fn, model)
-            print(f"Epoch {epoch} — val loss: {val_loss:.4f} (best: {best_validation_loss:.4f})")
-            wandb.log({"val_loss": val_loss, "best_val_loss": best_validation_loss})
+            print(f"Epoch {epoch} — val loss: {val_loss:.4f} (best: {best_validation_loss:.4f}; "
+                  f"{epochs_without_improvement}/{EARLY_STOPPING_PATIENCE} epochs without improvement)")
+            wandb.log({"val_loss": val_loss, "best_val_loss": best_validation_loss,
+                       "epochs_without_improvement": epochs_without_improvement})
 
             is_best = val_loss < best_validation_loss
             if is_best:
                 best_validation_loss = val_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
         else:
             print(f"Epoch {epoch} — no validation set available, skipping val loss / best-model tracking.")
 
@@ -219,6 +242,14 @@ def main():
             shutil.copy(
                 os.path.join(checkpoint_dir, "checkpoint.pth"),
                 os.path.join(checkpoint_dir, "checkpoint_best.pth"))
+
+        if val_dataloader is not None and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+            print(f"Early stopping: validation loss has not improved for "
+                  f"{EARLY_STOPPING_PATIENCE} consecutive epochs.")
+            break
+    else:
+        print(f"Reached the MAX_EPOCHS ceiling of {MAX_EPOCHS} without "
+              f"early stopping triggering.")
 
 
 if __name__ == "__main__":
