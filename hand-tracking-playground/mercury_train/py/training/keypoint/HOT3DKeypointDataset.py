@@ -220,7 +220,27 @@ class _SequenceProviders:
 class HOT3DKeypointDataset(torch.utils.data.Dataset):
     def __init__(self, sequence_dirs: list, hot3d_repo_root: str,
                  object_library_path: str, min_visibility_ratio: float = 0.2,
-                 frame_stride: int = 10, index_cache_dir: str = None):
+                 frame_stride: int = 10, index_cache_dir: str = None,
+                 eval_mode: bool = False):
+        """
+        eval_mode: when True, every per-sample random draw is removed, so a
+        sample is a deterministic function of its index alone.
+
+        Three things are randomised during training and must not be during
+        evaluation, because they are properties of the *measurement* rather
+        than of the model, and two models compared under different draws are
+        not being compared:
+          - the crop rotation, drawn uniformly over the full circle
+          - the crop radius multiplier, drawn over roughly [0.81, 1.18]
+          - the keypoint noise that decides where the crop is centred
+        In eval_mode the crop matrix comes from
+        py.evaluation.preprocess_baseline.keynet_crop_matrix at the centre of
+        those distributions, and it is centred on the ground truth itself.
+        The predicted-keypoint side input is also withheld, matching
+        validatoor.validation_loop's use_prediction=False.
+
+        Defaults to False, so the training path is bit-for-bit unchanged.
+        """
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
@@ -240,6 +260,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         self.min_visibility_ratio = min_visibility_ratio
         self.frame_stride = frame_stride
         self.index_cache_dir = index_cache_dir
+        self.eval_mode = eval_mode
         self.augmaker = AugmentationMaker(aug_config_validatoor)
 
         self._object_library = load_object_library(
@@ -603,21 +624,30 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             # Rare -- every other failure mode is now caught at index time.
             return self._empty_sample()
 
-        # Same cropping approach as RandoDataset: derive the crop from a
-        # NOISED version of the keypoints (simulating a previous frame's
-        # imperfect prediction, not oracle-perfect current-frame GT).
-        noisy_keypoints = add_2d_noise_to_keypoints(keypoints_px_and_depth[:, :2])
-        trans = crop(image, noisy_keypoints, is_right)
+        if self.eval_mode:
+            # Deterministic: crop centred on the ground truth, at the centre
+            # of the rotation and radius distributions training samples from.
+            # See the eval_mode note in __init__.
+            from py.evaluation import preprocess_baseline as _pp
+            trans = _pp.keynet_crop_matrix(keypoints_px_and_depth[:, :2], is_right)
+            predicted_px = None
+        else:
+            # Same cropping approach as RandoDataset: derive the crop from a
+            # NOISED version of the keypoints (simulating a previous frame's
+            # imperfect prediction, not oracle-perfect current-frame GT).
+            noisy_keypoints = add_2d_noise_to_keypoints(keypoints_px_and_depth[:, :2])
+            trans = crop(image, noisy_keypoints, is_right)
 
         img_cropped = cv2.warpAffine(image, trans, (128, 128))
         keypoints_cropped = _rotate_hand_keep_depth(keypoints_px_and_depth, trans)
 
-        # Matches RandoDataset's own "30% chance of no predicted input"
-        # convention, so this data source behaves consistently with the rest
-        # of KeyNet's training data.
-        predicted_px = None
-        if random.uniform(0, 1) >= 0.3:
-            predicted_px = rotate_hand(noisy_keypoints, trans)
+        if not self.eval_mode:
+            # Matches RandoDataset's own "30% chance of no predicted input"
+            # convention, so this data source behaves consistently with the
+            # rest of KeyNet's training data.
+            predicted_px = None
+            if random.uniform(0, 1) >= 0.3:
+                predicted_px = rotate_hand(noisy_keypoints, trans)
 
         ret = self.augmaker.do_one_augmentation(
             img_cropped,
