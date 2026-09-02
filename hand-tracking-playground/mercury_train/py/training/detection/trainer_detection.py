@@ -12,7 +12,8 @@ from torch.utils.data import DataLoader
 import DetNet
 import py.training.common.a_geometry as geo
 
-from py.training.detection.HOT3DVRSDetectionDataset import HOT3DVRSDetectionDataset
+from py.training.detection.HOT3DVRSDetectionDataset import (
+    HOT3DVRSDetectionDataset, worker_init as hot3d_worker_init)
 from py.training.common.hot3d_split import list_sequence_dirs, split_train_val
 from py.training.detection.load_weights import load_detnet_weights
 import py.training.detection.local_config as local_config
@@ -44,6 +45,14 @@ EARLY_STOPPING_PATIENCE = 8
 # a different split. Matches kpest_trainer.py's own TRAIN_SPLIT constant; see
 # py/training/common/hot3d_split.py for the split designs.
 TRAIN_SPLIT = "train_mixed"
+
+# Keep every Nth frame of each HOT3D recording. The cameras run at 30 Hz, so
+# consecutive frames are near-duplicates. Matches KeyNet's HOT3D_FRAME_STRIDE
+# so the two networks are fine-tuned on the same temporal sampling of the same
+# recordings; previously this loader used every frame while KeyNet used every
+# fifth, which meant the two networks saw the data at different densities for
+# no stated reason.
+HOT3D_FRAME_STRIDE = 5
 
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
@@ -142,28 +151,56 @@ def main():
             "local_config.hot3d_dataset_root — nothing to train on.")
     train_seq_dirs, val_seq_dirs = split_train_val(train_pool_dirs)
 
-    train_dataset = HOT3DVRSDetectionDataset(
-        sequence_dirs=train_seq_dirs,
-        hot3d_repo_root=local_config.hot3d_repo_root)
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    # loadfast is a smoke test: prove the pipeline runs end to end in minutes,
+    # not produce a model worth keeping. Mirrors kpest_trainer.py's own
+    # loadfast path. Read straight from the environment because this package's
+    # header.py, unlike the keypoint one, carries no env_settings object.
+    loadfast = bool(int(os.environ.get("AD4_LOADFAST", "0")))
+    if loadfast:
+        train_seq_dirs = train_seq_dirs[:2]
+        val_seq_dirs = val_seq_dirs[:1] or train_seq_dirs[:1]
 
+    print(f"[trainer_detection] {len(train_seq_dirs)} train / "
+          f"{len(val_seq_dirs)} val HOT3D sequences, "
+          f"frame_stride={HOT3D_FRAME_STRIDE}")
+
+    index_cache_dir = getattr(local_config, "hot3d_index_cache_dir", None)
+
+    def make_hot3d_loader(sequence_dirs, shuffle, augment):
+        dataset = HOT3DVRSDetectionDataset(
+            sequence_dirs=sequence_dirs,
+            hot3d_repo_root=local_config.hot3d_repo_root,
+            frame_stride=HOT3D_FRAME_STRIDE,
+            index_cache_dir=index_cache_dir,
+            augment=augment)
+        # num_workers>0 is safe here ONLY because of the dataset's
+        # worker_init(): DataLoader workers are forked, so without it they
+        # would inherit the parent's already-open VRS handles and two
+        # processes would read the same C++ file handle. See that module's
+        # docstring.
+        return DataLoader(
+            dataset, batch_size=batch_size, shuffle=shuffle,
+            num_workers=num_workers, worker_init_fn=hot3d_worker_init,
+            persistent_workers=num_workers > 0, drop_last=False)
+
+    train_dataloader = make_hot3d_loader(train_seq_dirs, shuffle=True,
+                                         augment=True)
 
     val_dataloader = None
     if val_seq_dirs:
-        val_dataset = HOT3DVRSDetectionDataset(
-            sequence_dirs=val_seq_dirs,
-            hot3d_repo_root=local_config.hot3d_repo_root)
-        val_dataloader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        # augment=False: an augmented validation split re-measures a different
+        # distribution every epoch, and early stopping would then react to
+        # that noise rather than to convergence.
+        val_dataloader = make_hot3d_loader(val_seq_dirs, shuffle=False,
+                                           augment=False)
     else:
         print("[trainer_detection] Too few HOT3D train-pool sequences to carve out "
             "a validation split — training will proceed with no validation-loss "
             "tracking until more sequences are available.")
-    # Test (run once after training): no held-out test dataset yet.
-    # Replace with HOT3D once obtained — that represents true cross-device
-    # generalisation from the HMD capture setup to a different XR device.
-    # test_dataloader = DataLoader(HOT3DDataset(...), ...)
+    # There is deliberately no test set here. All evaluation lives in
+    # py/evaluation/eval_detnet.py --split test_mixed, so that the zero-shot
+    # Monado baseline and this fine-tuned model are scored by exactly the same
+    # code path.
 
     model = DetNet.DetNet()
     load_detnet_weights(model)
@@ -186,8 +223,9 @@ def main():
     # regardless of what directory SLURM starts the job from, and scope the
     # directory by split so the resume block below cannot pick up a checkpoint
     # trained on different data -- see TRAIN_SPLIT.
-    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  f"checkpoints_{TRAIN_SPLIT}")
+    checkpoint_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "checkpoints_loadfast" if loadfast else f"checkpoints_{TRAIN_SPLIT}")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
