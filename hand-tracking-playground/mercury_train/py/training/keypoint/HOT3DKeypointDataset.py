@@ -662,17 +662,18 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             # NOISED version of the keypoints (simulating a previous frame's
             # imperfect prediction, not oracle-perfect current-frame GT).
             #
-            # The noise magnitude is in SOURCE-IMAGE PIXELS, and Aria and
-            # Quest SLAM cameras do not share a resolution. Under the mixed
-            # split the same draw is therefore a different physical
-            # perturbation per device. Left as-is deliberately: the crop is
-            # normalised to 128x128 immediately afterwards, so the effect is a
-            # modest difference in how far the crop can wander relative to the
-            # hand, and treating it as extra augmentation diversity is more
-            # defensible than introducing a device-conditional constant that
-            # the frozen Monado baseline could never have been trained under.
-            # Stated here so it is a documented property rather than an
-            # undiscovered one.
+            # Checked explicitly for the mixed split, because Aria and Quest
+            # SLAM frames differ in resolution (measured: ~640x480 against
+            # ~1148x1016) and an augmentation calibrated in absolute pixels
+            # would then be a different perturbation per device. It is not.
+            # add_2d_noise_to_keypoints derives both its standard deviations
+            # from bsqr(kps), the hand's own bounding-square side in that
+            # frame (stddev_overall = 0.3 * sz, per-joint = 0.07 * sz), and
+            # its homothety and rotation terms are unitless. crop() likewise
+            # sizes the crop from bsqr/palm_length_2d rather than from the
+            # frame. Every term is therefore relative to the hand, so the two
+            # devices receive the same augmentation in hand-relative units and
+            # no device-conditional constant is needed.
             noisy_keypoints = add_2d_noise_to_keypoints(keypoints_px_and_depth[:, :2])
             trans = crop(image, noisy_keypoints, is_right)
 
