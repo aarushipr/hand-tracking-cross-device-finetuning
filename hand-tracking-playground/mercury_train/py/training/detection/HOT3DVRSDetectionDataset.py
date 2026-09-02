@@ -158,13 +158,18 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         preprocess_baseline.DEVICE_ORIENTATION, which is where the verified
         per-device values live. Pass 0 to disable, for an ablation.
 
-        augment: apply augmentation.augment_image to every sample. True for
-        training, and it must be False for the validation set. Augmentation is
-        a random draw per sample per epoch, so an augmented validation split
-        re-measures a different distribution every epoch; the resulting
-        epoch-to-epoch noise is then what early stopping reacts to, rather
-        than genuine convergence. This mirrors the determinism argument
-        HOT3DKeypointDataset's eval_mode implements for KeyNet.
+        augment: randomise the framing. True for training, and it must be
+        False for the validation set. Augmentation is a random draw per sample
+        per epoch, so an augmented validation split re-measures a different
+        distribution every epoch; the resulting epoch-to-epoch noise is then
+        what early stopping reacts to, rather than genuine convergence. This
+        mirrors the determinism argument HOT3DKeypointDataset's eval_mode
+        implements for KeyNet.
+
+        augment=False does NOT skip augmentation.augment_image. That function
+        also performs the resize to the network's input size, so skipping it
+        feeds raw full-resolution frames to a fully-connected head and raises a
+        shape error. It is called with deterministic=True instead.
         """
         # hot3d's data_loaders package uses bare `from data_loaders.X import Y`
         # (relative to hot3d/hot3d), so that directory has to be on sys.path
@@ -432,8 +437,11 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
                     bbox_list[slot] = b
 
         e = ImageWithBoundingBoxes(image=image, bboxes=bbox_list)
-        if self.augment:
-            e = augmentation.augment_image(e)
+        # Always call augment_image: besides randomising, it performs the
+        # warpAffine that brings the frame to the network's input size and
+        # carries the boxes with it. deterministic=True removes only the random
+        # draws. See that function's docstring.
+        e = augmentation.augment_image(e, deterministic=not self.augment)
         e = augmentation.imgwithboundingboxes320_to_heatmaps_2hand(e)
         return e
 

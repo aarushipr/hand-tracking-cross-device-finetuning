@@ -47,10 +47,31 @@ def box_in_image(a: bbox, img_box: bbox) -> float:
     return ret
 
 
-def augment_image(thing: ImageWithBoundingBoxes):
+def augment_image(thing: ImageWithBoundingBoxes, deterministic: bool = False):
+    """
+    deterministic: remove every random draw, keeping the geometry.
+
+    This function does two jobs at once: it randomises the framing, AND it
+    performs the warpAffine that resizes the frame to the network's input size
+    and carries the boxes along with it. Only the first is augmentation; the
+    second is required for any sample to reach the network at all. Skipping the
+    whole function for a validation set therefore does not produce "the same
+    data without augmentation", it produces raw full-resolution frames that the
+    fully-connected head cannot consume.
+
+    With deterministic=True the random draws are replaced by the centre of
+    their own distributions -- no flip, no rotation, no centre jitter, and the
+    zoom at the mean of its range -- so a validation sample is a function of
+    its index alone and the same frame scores identically every epoch. This
+    mirrors HOT3DKeypointDataset's eval_mode, which fixes KeyNet's crop
+    rotation at zero and its radius multiplier at the centre of its training
+    range for exactly this reason: an augmented validation split re-measures a
+    different distribution every epoch, and early stopping then reacts to that
+    noise instead of to convergence.
+    """
     img = thing.image
     hands = thing.bboxes
-    flip = random.random() < 0.5
+    flip = (random.random() < 0.5) if not deterministic else False
 
     origW = npImgWidth(img)
     origH = npImgHeight(img)
@@ -67,7 +88,7 @@ def augment_image(thing: ImageWithBoundingBoxes):
         x_axis_len = npImgWidth(img)/2
         y_axis_len = npImgWidth(img)*(header.model_input_height/header.model_input_width)/2
 
-    rot = random.uniform(-math.pi*.1, math.pi*.1)
+    rot = random.uniform(-math.pi*.1, math.pi*.1) if not deterministic else 0.0
 
     x_axis = np.float32([math.cos(rot), math.sin(rot)])*x_axis_len
     y_axis = np.float32([-math.sin(rot), math.cos(rot)])*y_axis_len
@@ -83,14 +104,18 @@ def augment_image(thing: ImageWithBoundingBoxes):
     max_amt = origW/origH
     max_amt = max(max_amt, origH/origW)
 
-    amt = random.uniform(.9, max_amt+0.1)
+    # Mean of the training distribution, so the deterministic framing sits at
+    # the centre of what the network saw during training rather than at an edge.
+    amt = (random.uniform(.9, max_amt+0.1) if not deterministic
+           else (1.0 + max_amt) / 2)
 
     x_axis *= amt
     y_axis *= amt
 
     # This should be at least the amount required to move the binned image towards the top, bottom, left or right edge but now it's hard coded. Ugh.
-    center[0] += random.uniform(-0.04*origW, 0.04*origW)  # no!
-    center[1] += random.uniform(-0.1*origH, 0.1*origH)
+    if not deterministic:
+        center[0] += random.uniform(-0.04*origW, 0.04*origW)  # no!
+        center[1] += random.uniform(-0.1*origH, 0.1*origH)
 
     tl = center - x_axis - y_axis
     tr = center + x_axis - y_axis
@@ -107,8 +132,12 @@ def augment_image(thing: ImageWithBoundingBoxes):
 
     bbox_mul = np.linalg.norm([trans[0, 0], trans[1, 0]])
 
+    # The border fill is another random draw: with deterministic=True it is
+    # held at mid-grey, the centre of its 0-255 range.
+    border_value = random.randint(0, 255) if not deterministic else 128
     thing.image = cv2.warpAffine(
-        img, trans, (header.model_input_width, header.model_input_height), borderValue=random.randint(0, 255))
+        img, trans, (header.model_input_width, header.model_input_height),
+        borderValue=border_value)
 
     for idx, hand in enumerate(hands):
         if (hand is None):
