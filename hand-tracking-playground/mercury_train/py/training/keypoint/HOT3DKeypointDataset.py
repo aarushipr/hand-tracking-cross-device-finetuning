@@ -42,7 +42,8 @@ __getitem__, with nothing useful left to do about it -- that some of the
 21 joints projected behind the camera or outside the camera model's valid
 region. The only recourse there was to return a blank placeholder sample.
 
-Measured on the test_aria split, that happened to **40% of all samples**.
+Measured on the archived Aria-only test split, that happened to **40% of
+all samples** -- the figure has not been re-measured on the mixed split.
 Worse, the placeholder was labelled is_hand=1, so it was not a negative
 example but a mislabelled positive: a black image asserting that a hand
 was present at 21 coincident points. Training on it would have actively
@@ -243,6 +244,29 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         """
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
+
+        # Quest 3 HOT3D recordings carry no TimeCode track, so any code path
+        # that reaches AriaDataProvider raises without this. Both detection
+        # paths (HOT3DVRSDetectionDataset, eval_detnet.py) already apply it;
+        # this class did not, which was survivable only while training was
+        # Aria-only. Under the mixed split Quest sequences reach this class on
+        # every run. The shim is idempotent and a no-op for Aria.
+        #
+        # Note the shim's own scope caveat: it was verified against the
+        # detection ground truth (box2d_hands.csv), not against the UmeTrack
+        # keypoint ground truth this class reads. Applying it here is
+        # necessary, not sufficient -- run py/evaluation/check_quest_keypoints.py
+        # against a real Quest sequence before trusting Quest keypoint labels.
+        # Defensive sys.path insert: this class is usually imported from a
+        # caller that already put the mercury_train root on sys.path (e.g.
+        # kpest_trainer.py, eval_keynet.py), but don't assume that here --
+        # same pattern as HOT3DVRSDetectionDataset.
+        _mercury_train_root = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+        if _mercury_train_root not in sys.path:
+            sys.path.insert(0, _mercury_train_root)
+        from py.training.common.hot3d_timecode_compat import patch as _patch_quest_timecode
+        _patch_quest_timecode()
 
         from dataset_api import Hot3dDataProvider
         from data_loaders.loader_object_library import load_object_library
@@ -574,8 +598,10 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         stream_id anyway (see its _stream_timestamps_sorted), so using it
         directly per-stream is equivalent to what get_frameset_from_timestamp
         would resolve to here -- no separate frameset step needed.
-        Training is Aria-only by design (see py/training/common/hot3d_split.py),
-        so nothing in the training path is affected by the Quest branch below.
+
+        The Quest branch below is on the live training path: the mixed split
+        (see py/training/common/hot3d_split.py) puts Quest recordings into
+        both training and evaluation.
         """
         headset = bundle.hot3d_data_provider.get_device_type()
         if getattr(headset, "name", str(headset)) == "Aria":
@@ -635,6 +661,18 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             # Same cropping approach as RandoDataset: derive the crop from a
             # NOISED version of the keypoints (simulating a previous frame's
             # imperfect prediction, not oracle-perfect current-frame GT).
+            #
+            # The noise magnitude is in SOURCE-IMAGE PIXELS, and Aria and
+            # Quest SLAM cameras do not share a resolution. Under the mixed
+            # split the same draw is therefore a different physical
+            # perturbation per device. Left as-is deliberately: the crop is
+            # normalised to 128x128 immediately afterwards, so the effect is a
+            # modest difference in how far the crop can wander relative to the
+            # hand, and treating it as extra augmentation diversity is more
+            # defensible than introducing a device-conditional constant that
+            # the frozen Monado baseline could never have been trained under.
+            # Stated here so it is a documented property rather than an
+            # undiscovered one.
             noisy_keypoints = add_2d_noise_to_keypoints(keypoints_px_and_depth[:, :2])
             trans = crop(image, noisy_keypoints, is_right)
 

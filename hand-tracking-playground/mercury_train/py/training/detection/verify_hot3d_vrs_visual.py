@@ -1,7 +1,8 @@
 """
-Visual sanity check for HOT3DVRSDetectionDataset -- same purpose as
-verify_hot3d_visual.py (does the drawn box land on an actual visible hand,
-not empty space?), plus this one specifically needs to confirm the
+Visual sanity check for HOT3DVRSDetectionDataset: does the drawn box land on
+an actual visible hand, not empty space? Supersedes the earlier
+verify_hot3d_visual.py, which targeted a dataset class no longer in use.
+This one additionally needs to confirm the
 hand_index -> left/right slot assumption (0=left, 1=right) that
 HOT3DVRSDetectionDataset.py flags as unverified, since box2d_hands.csv
 doesn't self-document that.

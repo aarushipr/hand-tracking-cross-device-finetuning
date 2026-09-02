@@ -45,8 +45,10 @@ SCRIPT_DIR="$REPO_ROOT/py/training/detection"
 # 1. local_config.py — cp local_config_cluster.py over it, then fill in the
 #    REPLACE_ME paths (HMDHandRects/EgoHands/EpicKitchens) — nobody has
 #    confirmed these locations on the cluster yet, unlike the keypoint data.
-# 2. HOT3D is not yet obtained — trainer_detection.py's test split is a
-#    placeholder, this only trains + validates.
+# 2. Split pre-flight — same as train.sbatch:
+#      python py/training/common/hot3d_split.py <hot3d_dataset_root>
+#    trainer_detection.py trains on train_mixed and validates on a carve-out
+#    from it; it holds no test set. Test scoring is eval_detnet.py's job.
 # ---------------------------------------------------------------------------
 
 cd "$SCRIPT_DIR"

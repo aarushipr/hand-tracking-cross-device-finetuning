@@ -54,6 +54,15 @@ EARLY_STOPPING_PATIENCE = 8
 # materially worse than that in practice.
 HOT3D_FRAME_STRIDE = 5
 
+# Which hot3d_split split this run trains on. Also names the checkpoint
+# directory below, so a run can never resume from a checkpoint produced under
+# a different split. That is not a hypothetical: the archived Aria-only run
+# wrote its checkpoints to a fixed "checkpoints" directory, and the resume
+# block below would have picked them up and continued training them instead of
+# starting from the Monado weights -- silently, with nothing in the log to say
+# so. See py/training/common/hot3d_split.py for the split designs.
+TRAIN_SPLIT = "train_mixed"
+
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
     os.makedirs(output_dir, exist_ok=True)
@@ -230,24 +239,30 @@ def main():
     batch_size = batch_size_per_device * num_devices
 
     # ------------------------------------------------------------------
-    # Data: HOT3D only, Aria only.
+    # Data: HOT3D, mixed Aria + Quest.
     #
-    # Training and validation both come out of hot3d_split's "train" split,
-    # which is Aria-only by design: Quest recordings are never seen during
-    # training, so that evaluating on Quest measures generalisation to an
-    # unseen *device* rather than merely to unseen subjects. See
-    # py/training/common/hot3d_split.py for the full split rationale.
+    # Training and validation both come out of hot3d_split's "train_mixed"
+    # split: participants are partitioned 80/20 (participant-level, not
+    # sequence-level, so no subject's data crosses the train/test boundary),
+    # with the partition chosen so BOTH devices sit near the 80/20 target
+    # rather than only the combined total. Each participant's sequences from
+    # both devices land on whichever side that participant is assigned to.
+    # The assignment is frozen as a constant in hot3d_split.py, not recomputed
+    # from disk, so an incomplete dataset copy cannot silently change what is
+    # held out. Unlike the archived train/test_aria/test_quest design, this
+    # split does not isolate cross-device generalisation -- see
+    # py/training/common/hot3d_split.py for both designs.
     #
     # There is deliberately no test set here. All evaluation lives in
-    # evaluate_keypoint.py, so that the zero-shot Monado baseline and this
+    # eval_keynet.py, so that the zero-shot Monado baseline and this
     # fine-tuned model are scored by exactly the same code path, and the
     # metric can be changed without retraining anything.
     # ------------------------------------------------------------------
-    train_pool = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_path, "train")
+    train_pool = hot3d_split.list_sequence_dirs(local_config.hot3d_dataset_root, TRAIN_SPLIT)
     if not train_pool:
         raise RuntimeError(
-            f"[kpest_trainer] No HOT3D Aria training sequences found under "
-            f"{local_config.hot3d_dataset_path} -- nothing to train on.")
+            f"[kpest_trainer] No HOT3D training sequences found under "
+            f"{local_config.hot3d_dataset_root} -- nothing to train on.")
 
     train_dirs, val_dirs = hot3d_split.split_train_val(train_pool)
 
@@ -323,10 +338,12 @@ def main():
     # Smoke-test runs get their own checkpoint directory. Otherwise a
     # loadfast run would write checkpoint.pth into the real one, and the
     # resume block just below would silently pick up a model trained on two
-    # sequences at the start of the next real run.
+    # sequences at the start of the next real run. Real runs are scoped by
+    # split name for the same reason, one level up -- see TRAIN_SPLIT.
     checkpoint_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "checkpoints_loadfast" if header.env_settings.loadfast else "checkpoints")
+        "checkpoints_loadfast" if header.env_settings.loadfast
+        else f"checkpoints_{TRAIN_SPLIT}")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
@@ -424,9 +441,9 @@ def main():
     best_checkpoint = os.path.join(checkpoint_dir, "checkpoint_best.pth")
     print(f"\nTraining complete. Best validation loss: {best_validation_loss:.4f}")
     print(f"Best checkpoint: {best_checkpoint}")
-    print("Score it against the held-out splits with, e.g.:")
-    print(f"  python py/training/keypoint/evaluate_keypoint.py "
-          f"--weights {best_checkpoint} --split test_aria")
+    print("Score it against the held-out split with, e.g.:")
+    print(f"  python py/evaluation/eval_keynet.py "
+          f"--weights {best_checkpoint} --split test_mixed")
     wandb.log({"final_best_val_loss": best_validation_loss})
 
 

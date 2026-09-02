@@ -66,12 +66,12 @@ validatoor.validation_loop does with use_prediction=False. Both models are
 handicapped identically. --use-predicted-input restores it as an ablation.
 
 Usage:
-    python py/evaluation/eval_keynet.py --weights monado --split test_aria \
-        --out results/keynet_baseline_aria.json
+    python py/evaluation/eval_keynet.py --weights monado --split test_mixed \
+        --out results/keynet_baseline_mixed.json
 
     python py/evaluation/eval_keynet.py \
         --weights py/training/keypoint/checkpoints/checkpoint_best.pth \
-        --split test_aria --out results/keynet_finetuned_aria.json
+        --split test_mixed --out results/keynet_finetuned_mixed.json
 """
 import argparse
 import json
@@ -180,13 +180,29 @@ def build_model(weights, device):
     return model.to(device).eval(), source
 
 
+SPLIT_CHOICES = [
+    # Current mixed Aria+Quest design.
+    "val_mixed", "test_mixed",
+    # Archived Aria-only-training / cross-device-evaluation design.
+    "val", "test_aria", "test_quest", "device_shift_quest", "cross_device_test",
+]
+
+
 def sequence_dirs_for_split(split):
-    root = local_config.hot3d_dataset_path
-    if split == "val":
-        # The trainer's own carve-out, so "val" here means exactly the
-        # sequences the trainer validated on.
+    """
+    Resolve a --split name to sequence directories.
+
+    "val" and "val_mixed" are not hot3d_split splits: they are the trainer's
+    own carve-out from its training pool, reproduced here with the same
+    function and the same seed so that each means exactly the sequences the
+    corresponding trainer validated on. "val" stays pointed at the archived
+    Aria-only training pool so the archived checkpoints remain scorable.
+    """
+    root = local_config.hot3d_dataset_root
+    if split in ("val", "val_mixed"):
+        train_split = "train" if split == "val" else "train_mixed"
         _, val_dirs = hot3d_split.split_train_val(
-            hot3d_split.list_sequence_dirs(root, "train"))
+            hot3d_split.list_sequence_dirs(root, train_split))
         return val_dirs
     return hot3d_split.list_sequence_dirs(root, split)
 
@@ -320,8 +336,7 @@ def main():
     parser.add_argument("--weights", required=True,
                         help="'monado' for the zero-shot upstream weights, or a .pth path")
     parser.add_argument("--split", required=True,
-                        choices=["val", "test_aria", "test_quest",
-                                 "device_shift_quest", "cross_device_test"])
+                        choices=SPLIT_CHOICES)
     parser.add_argument("--frame-stride", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--stochastic-crop", action="store_true",
@@ -352,7 +367,7 @@ def main():
     sequence_dirs = sequence_dirs_for_split(args.split)
     if not sequence_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under "
-                         f"{local_config.hot3d_dataset_path}")
+                         f"{local_config.hot3d_dataset_root}")
     print(f"[eval_keynet] {args.split}: {len(sequence_dirs)} sequences")
 
     try:
@@ -366,9 +381,10 @@ def main():
         )
     except NotImplementedError as e:
         raise SystemExit(
-            f"\n[eval_keynet] This split contains Quest recordings, which "
-            f"HOT3DKeypointDataset cannot load yet.\n  {e}\n"
-            f"Aria splits (val, test_aria) work today.")
+            f"\n[eval_keynet] HOT3DKeypointDataset could not load this "
+            f"split.\n  {e}\n"
+            f"If the split contains Quest recordings, check them first with "
+            f"py/evaluation/check_quest_keypoints.py.")
 
     # Guards the photometric half of the convention: augmentation must be off.
     assert dataset.augmaker.aug_config.validation_dataset, \

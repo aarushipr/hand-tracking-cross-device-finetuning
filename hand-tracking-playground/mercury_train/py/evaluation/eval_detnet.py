@@ -35,12 +35,12 @@ docstring for what the convention is and why the training code rather than
 the C++ runtime defines it.
 
 Usage:
-    python py/evaluation/eval_detnet.py --weights monado --split test_aria \
-        --out results/detnet_baseline_aria.json
+    python py/evaluation/eval_detnet.py --weights monado --split test_mixed \
+        --out results/detnet_baseline_mixed.json
 
     python py/evaluation/eval_detnet.py \
         --weights py/training/detection/checkpoints/checkpoint_best.pth \
-        --split test_aria --out results/detnet_finetuned_aria.json
+        --split test_mixed --out results/detnet_finetuned_mixed.json
 """
 import argparse
 import csv
@@ -154,6 +154,38 @@ class Hot3dRawFrameSource:
                                   "box": (b.left, b.top, b.right, b.bottom),
                                   "visibility_ratio": float(hand_box.visibility_ratio)})
         return seq_name, headset, str(stream_id), ts, image, boxes
+
+
+# ---------------------------------------------------------------------------
+# Splits
+# ---------------------------------------------------------------------------
+
+SPLIT_CHOICES = [
+    # Current mixed Aria+Quest design.
+    "train_mixed", "val_mixed", "test_mixed",
+    # Archived Aria-only-training / cross-device-evaluation design.
+    "train", "val", "test_aria", "test_quest", "device_shift_quest",
+    "cross_device_test",
+    # Everything with usable ground truth, both devices.
+    "all_labeled",
+]
+
+
+def sequence_dirs_for_split(dataset_root, split):
+    """
+    Resolve a --split name to sequence directories.
+
+    "val" and "val_mixed" are not hot3d_split splits: they are the trainer's
+    own carve-out from its training pool, reproduced here with the same
+    function and the same seed so that "val" means exactly the sequences the
+    trainer validated on. Matches eval_keynet.py's resolver of the same name.
+    """
+    if split in ("val", "val_mixed"):
+        train_split = "train" if split == "val" else "train_mixed"
+        _, val_dirs = hot3d_split.split_train_val(
+            hot3d_split.list_sequence_dirs(dataset_root, train_split))
+        return val_dirs
+    return hot3d_split.list_sequence_dirs(dataset_root, split)
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +337,7 @@ def main():
     parser.add_argument("--weights", required=True,
                         help="'monado' for the shipped zero-shot ONNX, or a path to a .pth")
     parser.add_argument("--split", required=True,
-                        choices=["train", "val", "test_aria", "test_quest",
-                                 "cross_device_test", "all_labeled"])
+                        choices=SPLIT_CHOICES)
     parser.add_argument("--models-dir", default=None,
                         help="folder holding grayscale_detection_160x160.onnx "
                              "(default: <repo>/hand-tracking-models)")
@@ -339,10 +370,7 @@ def main():
     models_dir = args.models_dir or os.path.join(
         _MERCURY_TRAIN_ROOT, "..", "..", "hand-tracking-models")
 
-    seq_dirs = hot3d_split.filter_sequence_dirs(
-        sorted(os.path.join(dataset_root, d) for d in os.listdir(dataset_root)
-               if os.path.isdir(os.path.join(dataset_root, d)) and d.startswith("P0")),
-        args.split)
+    seq_dirs = sequence_dirs_for_split(dataset_root, args.split)
     if not seq_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under {dataset_root}")
     print(f"[eval_detnet] {args.split}: {len(seq_dirs)} sequences")

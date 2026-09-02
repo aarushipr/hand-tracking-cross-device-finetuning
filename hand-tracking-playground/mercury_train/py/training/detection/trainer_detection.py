@@ -39,6 +39,12 @@ MAX_EPOCHS = 120
 # would stop on that noise rather than on genuine convergence.
 EARLY_STOPPING_PATIENCE = 8
 
+# Which hot3d_split split this run trains on. Also names the checkpoint
+# directory below, so a run can never resume from a checkpoint produced under
+# a different split. Matches kpest_trainer.py's own TRAIN_SPLIT constant; see
+# py/training/common/hot3d_split.py for the split designs.
+TRAIN_SPLIT = "train_mixed"
+
 
 def save_checkpoint(states, output_dir, filename='checkpoint.pth'):
     os.makedirs(output_dir, exist_ok=True)
@@ -128,7 +134,7 @@ def main():
 
     batch_size = 64
     
-    train_pool_dirs = list_sequence_dirs(local_config.hot3d_dataset_root, "train")
+    train_pool_dirs = list_sequence_dirs(local_config.hot3d_dataset_root, TRAIN_SPLIT)
     
     if not train_pool_dirs:
         raise RuntimeError(
@@ -177,8 +183,11 @@ def main():
     best_validation_loss = float('inf')
 
     # Use an absolute path so checkpoints are always written to the same place
-    # regardless of what directory SLURM starts the job from.
-    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
+    # regardless of what directory SLURM starts the job from, and scope the
+    # directory by split so the resume block below cannot pick up a checkpoint
+    # trained on different data -- see TRAIN_SPLIT.
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  f"checkpoints_{TRAIN_SPLIT}")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
