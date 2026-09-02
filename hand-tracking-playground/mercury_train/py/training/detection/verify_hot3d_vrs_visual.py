@@ -9,8 +9,8 @@ doesn't self-document that.
 
 Usage:
     python verify_hot3d_vrs_visual.py \
-        --sequence-dirs /storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0003_c701bd11 \
-        --hot3d-repo-root /storage/user/praa/hot3d_full_setup/hot3d/hot3d \
+        --sequence-dirs /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d/dataset/P0003_c701bd11 \
+        --hot3d-repo-root /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d \
         --out-dir /storage/user/praa/hot3d_full_setup/viz_vrs \
         --num-samples 12
 """

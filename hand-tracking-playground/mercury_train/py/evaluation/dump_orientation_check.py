@@ -19,8 +19,8 @@ hot3d_baseline_detection_eval.py's --orientation flag for this device.
 Usage (run on the cluster, where the real HOT3D data lives -- this can't
 be run from a sandbox without the dataset and projectaria_tools installed):
     python dump_orientation_check.py \\
-        --sequence-dir /storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0013_XXXXXXXX \\
-        --hot3d-repo-root /storage/user/praa/hot3d_full_setup/hot3d/hot3d \\
+        --sequence-dir /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d/dataset/P0013_XXXXXXXX \\
+        --hot3d-repo-root /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d \\
         --device Quest \\
         --out-dir /storage/user/praa/hot3d_full_setup/orientation_check_quest \\
         --num-frames 4

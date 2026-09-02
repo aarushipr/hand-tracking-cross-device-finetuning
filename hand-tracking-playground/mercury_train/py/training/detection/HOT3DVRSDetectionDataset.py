@@ -88,8 +88,8 @@ box2d CSV's, the same role EgoHands fills for DetNet upstream.
 
 Usage:
     ds = HOT3DVRSDetectionDataset(
-        sequence_dirs=["/storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0003_c701bd11"],
-        hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d/hot3d",
+        sequence_dirs=["/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d/dataset/P0003_c701bd11"],
+        hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d",
         min_visibility_ratio=0.2,
         frame_stride=5,
         index_cache_dir="/storage/user/praa/scratch/hot3d_detection_index",
