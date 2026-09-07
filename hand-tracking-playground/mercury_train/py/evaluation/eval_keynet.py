@@ -207,11 +207,30 @@ def sequence_dirs_for_split(split):
     return hot3d_split.list_sequence_dirs(root, split)
 
 
+def device_labels_for_dataset(dataset):
+    """
+    Per-dataset-index device label ("Aria" / "Quest3" / None), in the same
+    order the DataLoader below iterates in.
+
+    HOT3DKeypointDataset resolves an index to a sequence via
+    self.sequence_dirs[self._seq_idx[idx]] (see HOT3DKeypointDataset.py,
+    __getitem__). This reads those two attributes from the outside rather
+    than adding a public accessor to that class, the same pattern already
+    used by measure_hand_presence_rate.py. It only lines up with evaluate()'s
+    scored samples because the dataloader built in main() below is
+    shuffle=False, drop_last=False -- evaluate() matches these labels to
+    batches purely by position.
+    """
+    per_seq_device = [hot3d_split.headset_of(d) for d in dataset.sequence_dirs]
+    return np.array([per_seq_device[int(i)] for i in dataset._seq_idx], dtype=object)
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
-def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None):
+def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
+             device_labels=None):
     """
     A joint is excluded from scoring if its ground truth falls outside the
     128x128 crop (its Gaussian would sit off the grid entirely, so no
@@ -226,7 +245,9 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
     """
     errors, depth_errors, floor_errors = [], [], []
     joint_masks, depth_joint_masks = [], []
+    device_batches = []
     n_samples = n_degenerate = 0
+    sample_offset = 0
 
     total = len(dataloader) if not limit_batches else min(len(dataloader), limit_batches)
     with torch.no_grad():
@@ -241,6 +262,15 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
             gt_xy_hmap = doct["gt_xy"].to(device).float()
             xy_valid = doct["xy_valid_per_joint"].to(device).bool()
             depth_valid = doct["depth_valid_per_joint"].to(device).bool()
+
+            # device_labels (built in main() via device_labels_for_dataset) is
+            # indexed in dataset order; this DataLoader is shuffle=False,
+            # drop_last=False, so batch i always covers dataset indices
+            # [sample_offset : sample_offset + bs].
+            bs = image.shape[0]
+            batch_devices = (device_labels[sample_offset:sample_offset + bs]
+                              if device_labels is not None else None)
+            sample_offset += bs
 
             pred_kp = doct["input_predicted_keypoints"].to(device).float()
             pred_valid = doct["input_predicted_keypoints_valid"].to(device).float()
@@ -270,6 +300,8 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
             depth_errors.append((decode_depth(model_depth) - gt_z).abs().cpu())
             joint_masks.append(mask.cpu())
             depth_joint_masks.append((mask & depth_valid).cpu())
+            if batch_devices is not None:
+                device_batches.append(batch_devices)
 
     if not errors:
         raise RuntimeError("No usable samples in this split.")
@@ -288,7 +320,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
         jm = mask[:, joint]
         per_joint.append(float(err[:, joint][jm].mean()) if jm.any() else None)
 
-    return {
+    result = {
         "n_samples": n_samples,
         "n_degenerate_samples_excluded": n_degenerate,
         "n_joints_scored": int(m.sum()),
@@ -300,6 +332,31 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None)
         "pck": {f"@{t}px": float((e < t).mean()) for t in PCK_THRESHOLDS_PX},
         "per_joint_mean_error_px": per_joint,
     }
+
+    if device_batches:
+        # Broadcast each sample's device label across its 21 joints so it can
+        # be indexed by the same flat joint-level masks (m, dm) used above --
+        # one device string per scored joint, not per sample.
+        sample_devices = np.concatenate(device_batches)
+        joint_devices = np.repeat(sample_devices[:, None], err.shape[1], axis=1).reshape(-1)
+        dev_e, dev_m = joint_devices[m], joint_devices[dm]
+
+        by_device = {}
+        for dev in sorted(set(sample_devices) - {None}):
+            sel = dev_e == dev
+            if not sel.any():
+                continue
+            dsel = dev_m == dev
+            by_device[dev] = {
+                "n_joints_scored": int(sel.sum()),
+                "mean_joint_error_px": float(e[sel].mean()),
+                "median_joint_error_px": float(np.median(e[sel])),
+                "pck": {f"@{t}px": float((e[sel] < t).mean()) for t in PCK_THRESHOLDS_PX},
+                "depth_mae": float(d[dsel].mean()) if dsel.any() else None,
+            }
+        result["by_device"] = by_device
+
+    return result
 
 
 def print_report(split, source, frame_stride, use_predicted_input, deterministic, r):
@@ -328,6 +385,14 @@ def print_report(split, source, frame_stride, use_predicted_input, deterministic
     print("  per-joint mean error (px):")
     for name, v in zip(JOINT_NAMES, r["per_joint_mean_error_px"]):
         print(f"    {name:<12} {v:7.3f}" if v is not None else f"    {name:<12}      --")
+    if r.get("by_device"):
+        print("-" * 66)
+        print("  mean joint error by device:")
+        for dev, dr in sorted(r["by_device"].items()):
+            print(f"    {dev:<8} n={dr['n_joints_scored']:>7}  "
+                  f"mean {dr['mean_joint_error_px']:7.3f} px  "
+                  f"median {dr['median_joint_error_px']:7.3f} px  "
+                  f"PCK@5px {dr['pck']['@5.0px']*100:5.2f}%")
     print("=" * 66 + "\n")
 
 
@@ -400,7 +465,13 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model, source = build_model(args.weights, device)
 
-    result = evaluate(model, dataloader, device, args.use_predicted_input, args.limit)
+    # Valid only because the DataLoader above is shuffle=False, drop_last=False:
+    # evaluate() lines these labels up with scored samples purely by batch
+    # position (see device_labels_for_dataset / evaluate docstrings).
+    device_labels = device_labels_for_dataset(dataset)
+
+    result = evaluate(model, dataloader, device, args.use_predicted_input, args.limit,
+                       device_labels=device_labels)
     print_report(args.split, source, args.frame_stride, args.use_predicted_input,
                  deterministic, result)
 
