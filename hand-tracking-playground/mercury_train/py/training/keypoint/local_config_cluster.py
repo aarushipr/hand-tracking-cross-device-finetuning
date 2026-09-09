@@ -21,3 +21,10 @@ hot3d_object_library_path = "/storage/user/praa/hot3d_full_setup/hot3d/hot3d/dat
 # bound and slow; caching it makes every run after the first start in
 # seconds. Scratch, not the repo -- it is regenerable output, not source.
 hot3d_index_cache_dir = "/storage/user/praa/scratch/hot3d_keypoint_index"
+
+# Phanesim (see PhanesimKeypointDataset.py) -- phase-2 KeyNet fine-tuning,
+# same two pooled dataset roots as detection's phase 2.
+phanesim_dataset_roots = [
+    "/storage/user/praa/phanesim_dataset/dataset",
+    "/storage/user/praa/phanesim_dataset/dataset2",
+]
