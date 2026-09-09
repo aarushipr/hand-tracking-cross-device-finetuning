@@ -127,10 +127,20 @@ def main():
     train_dataset = PhanesimKeypointDataset(clip_dirs=train_clips, eval_mode=False)
     val_dataset = PhanesimKeypointDataset(clip_dirs=val_clips, eval_mode=False)
 
+    # drop_last=False, NOT kpest_trainer.py's own drop_last=True for its
+    # train loader -- with loadfast's 2-clip slice (each phanesim clip is
+    # only ~15 frames), the whole train set can be smaller than one batch,
+    # so drop_last=True would drop every batch, leaving train_loop's
+    # for-loop over dataloader_train with zero iterations and
+    # `total_loss / loss_divisor` a literal division by zero. Confirmed
+    # 2026-09-09 (job 1700699). trainer_detection_phanesim.py's loader
+    # already avoided this same trap the same way; applying it here too.
+    # Harmless for the real run: at most one smaller-than-usual batch per
+    # epoch out of thousands.
     dataloader_train = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, persistent_workers=num_workers > 0,
-        drop_last=True)
+        drop_last=False)
     dataloader_val = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, persistent_workers=num_workers > 0,
