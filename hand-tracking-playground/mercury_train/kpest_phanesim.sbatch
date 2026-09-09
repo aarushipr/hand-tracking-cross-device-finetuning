@@ -29,6 +29,20 @@ export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/openc
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 
+# Disable GUI -- there is no display on the cluster. This is required;
+# without it, visualizer.py's periodic display_and_log_output() calls
+# cv2.imshow and crashes with "The function is not implemented" the
+# first time it fires. Copied from train.sbatch (phase 1's own working
+# KeyNet job), which already has this -- missed it when first writing
+# this script since trainer_detection_phanesim.py has no GUI code path
+# at all. Confirmed 2026-09-09 (job 1700705).
+export AD4_ENABLEGUI=0
+
+# Real run should track to wandb like phase 1's train.sbatch does --
+# unlike the smoke test, which deliberately leaves this unset (off)
+# so tiny 2-clip loadfast runs don't clutter the dashboard.
+export AD4_ENABLEWANDB=1
+
 REPO_ROOT="/storage/user/praa/working_code_mercury_train/hand-tracking-playground/mercury_train"
 SCRIPT_DIR="$REPO_ROOT/py/training/keypoint"
 
