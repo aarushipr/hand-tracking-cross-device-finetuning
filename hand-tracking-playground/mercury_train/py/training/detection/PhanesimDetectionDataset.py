@@ -37,6 +37,10 @@ Verified against real data before writing this (see thesis-work chat log,
     handedness is unambiguous here (unlike HOT3DVRSDetectionDataset's
     hand_index 0/1 assumption for HOT3D).
 
+Confirmed working end to end on the cluster 2026-09-09: 50185 samples loaded
+across both roots, sample contents (160x160 crop, exists/center/size all in
+sane ranges) look correct.
+
 NOT yet verified, flag if wrong: whether every clip in both `dataset` and
 `dataset2` shares the same camera intrinsics/orientation as clip_00000 --
 only a handful of clips were spot-checked. If a future fine-tuning run's
@@ -58,35 +62,61 @@ from a_structs import ImageWithBoundingBoxes, bbox
 from py.evaluation import preprocess_baseline as _pp
 
 
+def discover_clip_dirs(dataset_roots: list) -> list:
+    """Sorted list of clip directories across dataset_roots that have both
+    _done.json and cam_head0/hand_rect.csv. Factored out of __init__ so
+    callers that need to split by CLIP rather than by frame (e.g. carving
+    out a validation set without letting near-duplicate frames from the
+    same clip leak across the split -- see trainer_detection_phanesim.py)
+    use the exact same filtering the dataset itself does, rather than a
+    second copy that could quietly drift out of sync.
+    """
+    clip_dirs = []
+    for root in dataset_roots:
+        for clip_dir in sorted(glob.glob(os.path.join(root, "clip_*"))):
+            done_path = os.path.join(clip_dir, "_done.json")
+            rect_path = os.path.join(clip_dir, "cam_head0", "hand_rect.csv")
+            if os.path.exists(done_path) and os.path.exists(rect_path):
+                clip_dirs.append(clip_dir)
+    return clip_dirs
+
+
 class PhanesimDetectionDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_roots: list, orientation: int = 0,
-                 margin: float = 0.0, augment: bool = True):
+    def __init__(self, dataset_roots: list = None, clip_dirs: list = None,
+                 orientation: int = 0, margin: float = 0.0, augment: bool = True):
+        """Either pass dataset_roots (globs every clip_* under each root --
+        the normal case) or clip_dirs (an explicit, already-filtered list
+        of clip directories -- used by trainer_detection_phanesim.py to
+        build separate train/val datasets from a single clip-level split).
+        """
+        if clip_dirs is None:
+            if not dataset_roots:
+                raise ValueError(
+                    "[PhanesimDetectionDataset] Provide either dataset_roots "
+                    "or clip_dirs.")
+            clip_dirs = discover_clip_dirs(dataset_roots)
+
         self.orientation = orientation
         self.margin = margin
         self.augment = augment
 
         self._samples = []  # list of (clip_dir, frame_idx)
-        for root in dataset_roots:
-            for clip_dir in sorted(glob.glob(os.path.join(root, "clip_*"))):
-                done_path = os.path.join(clip_dir, "_done.json")
-                rect_path = os.path.join(clip_dir, "cam_head0", "hand_rect.csv")
-                if not (os.path.exists(done_path) and os.path.exists(rect_path)):
-                    continue
-                with open(rect_path) as f:
-                    n_frames = sum(1 for _ in f) - 1  # minus header row
-                for i in range(n_frames):
-                    self._samples.append((clip_dir, i))
+        for clip_dir in clip_dirs:
+            rect_path = os.path.join(clip_dir, "cam_head0", "hand_rect.csv")
+            with open(rect_path) as f:
+                n_frames = sum(1 for _ in f) - 1  # minus header row
+            for i in range(n_frames):
+                self._samples.append((clip_dir, i))
 
         if not self._samples:
             raise RuntimeError(
                 f"[PhanesimDetectionDataset] Found 0 samples across "
-                f"{len(dataset_roots)} dataset root(s): {dataset_roots}. "
-                f"Check the paths and that clips have both _done.json and "
-                f"cam_head0/hand_rect.csv.")
+                f"{len(clip_dirs)} clip dir(s). Check the paths and that "
+                f"clips have both _done.json and cam_head0/hand_rect.csv.")
 
         print(f"[PhanesimDetectionDataset] {len(self._samples)} samples from "
-              f"{len(dataset_roots)} dataset root(s) (orientation="
-              f"{self.orientation}, margin={self.margin}, augment={self.augment})")
+              f"{len(clip_dirs)} clip(s) (orientation={self.orientation}, "
+              f"margin={self.margin}, augment={self.augment})")
 
     def __len__(self):
         return len(self._samples)
@@ -150,7 +180,7 @@ if __name__ == "__main__":
             "root paths (e.g. ['/storage/user/praa/phanesim_dataset/dataset', "
             "'/storage/user/praa/phanesim_dataset/dataset2']) before running "
             "this as a smoke test.")
-    d = PhanesimDetectionDataset(roots)
+    d = PhanesimDetectionDataset(dataset_roots=roots)
     print(len(d))
     samp = d[0]
     print(samp)
