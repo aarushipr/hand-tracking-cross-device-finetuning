@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1,VRAM:24G
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/storage/slurm/logs/slurm-%j.out
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
@@ -43,7 +43,13 @@ echo "Node:   $SLURMD_NODENAME"
 
 echo
 echo "===== DetNet phanesim phase-2 checkpoints ====="
-for ckpt in py/training/detection/checkpoints_phanesim_phase2/checkpoint_*.pth; do
+# Trimmed to checkpoint_20 only: job 1701397 was cancelled at the 4h time
+# limit after scoring just checkpoint_0 (each checkpoint eval reloads the
+# full HOT3D VRS dataset from scratch, which is slow). We already have
+# checkpoint_0 and checkpoint_best from earlier runs, so checkpoint_20 is
+# the one new midpoint needed to see whether forgetting is gradual or
+# already complete by epoch 0.
+for ckpt in py/training/detection/checkpoints_phanesim_phase2/checkpoint_20.pth; do
     [ -e "$ckpt" ] || continue
     name=$(basename "$ckpt" .pth)
     echo "----- DetNet $name -----"
@@ -54,7 +60,10 @@ done
 
 echo
 echo "===== KeyNet phanesim phase-2 checkpoints ====="
-for ckpt in py/training/keypoint/checkpoints_phanesim_phase2/checkpoint_*.pth; do
+# Trimmed to checkpoint_0 and checkpoint_10: we already have checkpoint_best
+# from the earlier single-checkpoint eval, so these two give KeyNet's own
+# epoch-0 and one midpoint, same reasoning as the DetNet trim above.
+for ckpt in py/training/keypoint/checkpoints_phanesim_phase2/checkpoint_0.pth py/training/keypoint/checkpoints_phanesim_phase2/checkpoint_10.pth; do
     [ -e "$ckpt" ] || continue
     name=$(basename "$ckpt" .pth)
     echo "----- KeyNet $name -----"
