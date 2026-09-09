@@ -92,7 +92,7 @@ def main():
     # real phanesim clips through training and validation, and writing a
     # real checkpoint -- not produce a model worth keeping. Mirrors
     # trainer_detection.py's own AD4_LOADFAST path; writes to
-    # checkpoints_loadfast/ so it can never collide with or be mistaken for
+    # checkpoints_loadfast_phanesim/ so it can never collide with or be mistaken for
     # a real checkpoints_phanesim_phase2/ run.
     loadfast = bool(int(os.environ.get("AD4_LOADFAST", "0")))
     if loadfast:
@@ -162,9 +162,16 @@ def main():
     start_epoch = 0
     best_validation_loss = float('inf')
 
+    # A distinct name from trainer_detection.py's own "checkpoints_loadfast"
+    # -- NOT a cosmetic choice. This bug actually happened: an earlier run
+    # here picked up a stale checkpoint.pth already sitting in a shared
+    # checkpoints_loadfast/ dir (left over from HOT3D loadfast testing),
+    # silently "resumed" from its epoch 2, and exited having run zero real
+    # training steps while still printing a success-looking message. Caught
+    # 2026-09-09 by noticing the log had no "Training i/length" lines at all.
     checkpoint_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "checkpoints_loadfast" if loadfast else CHECKPOINT_DIRNAME)
+        "checkpoints_loadfast_phanesim" if loadfast else CHECKPOINT_DIRNAME)
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     # Still allow resuming THIS phase's own training if it gets preempted
