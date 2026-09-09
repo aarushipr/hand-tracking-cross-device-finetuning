@@ -86,9 +86,21 @@ def main():
     val_clip_set = set(val_clips)
     train_clips = [c for c in all_clips if c not in val_clip_set]
 
+    # loadfast is a smoke test: prove phase 2's pipeline runs end to end in
+    # minutes -- loading the real phase-1 checkpoint, running a couple of
+    # real phanesim clips through training and validation, and writing a
+    # real checkpoint -- not produce a model worth keeping. Mirrors
+    # trainer_detection.py's own AD4_LOADFAST path; writes to
+    # checkpoints_loadfast/ so it can never collide with or be mistaken for
+    # a real checkpoints_phanesim_phase2/ run.
+    loadfast = bool(int(os.environ.get("AD4_LOADFAST", "0")))
+    if loadfast:
+        train_clips = train_clips[:2]
+        val_clips = val_clips[:1] or train_clips[:1]
+
     print(f"[trainer_detection_phanesim] {len(train_clips)} train / "
           f"{len(val_clips)} val clips (stride={VAL_CLIP_STRIDE}) "
-          f"from {len(all_clips)} total")
+          f"from {len(all_clips)} total" + (" [LOADFAST]" if loadfast else ""))
 
     train_dataset = PhanesimDetectionDataset(clip_dirs=train_clips, augment=True)
     val_dataset = PhanesimDetectionDataset(clip_dirs=val_clips, augment=False)
@@ -138,7 +150,8 @@ def main():
     best_validation_loss = float('inf')
 
     checkpoint_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), CHECKPOINT_DIRNAME)
+        os.path.dirname(os.path.abspath(__file__)),
+        "checkpoints_loadfast" if loadfast else CHECKPOINT_DIRNAME)
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     # Still allow resuming THIS phase's own training if it gets preempted
@@ -155,7 +168,13 @@ def main():
 
     epochs_without_improvement = 0
 
-    for epoch in range(start_epoch, MAX_EPOCHS):
+    # Hard cap at 2 epochs under loadfast regardless of early stopping --
+    # with only 2-3 tiny clips, validation loss could plausibly keep
+    # "improving" by noise alone for longer than patience allows, and the
+    # whole point of loadfast is a bounded few-minute run.
+    effective_max_epochs = 2 if loadfast else MAX_EPOCHS
+
+    for epoch in range(start_epoch, effective_max_epochs):
         print(f"Epoch {epoch}\n---------------------------------------")
         wandb.log({"epoch": epoch})
 
@@ -200,8 +219,8 @@ def main():
                   f"{EARLY_STOPPING_PATIENCE} consecutive epochs.")
             break
     else:
-        print(f"Reached the MAX_EPOCHS ceiling of {MAX_EPOCHS} without "
-              f"early stopping triggering.")
+        print(f"Reached the epoch ceiling of {effective_max_epochs} without "
+              f"early stopping triggering." + (" [LOADFAST]" if loadfast else ""))
 
 
 if __name__ == "__main__":
