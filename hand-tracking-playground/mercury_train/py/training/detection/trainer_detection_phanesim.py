@@ -39,6 +39,7 @@ from py.training.detection.PhanesimDetectionDataset import (
 from py.training.detection.trainer_detection import (
     train_batch, validate_epoch, set_train_mode, save_checkpoint,
     MAX_EPOCHS, EARLY_STOPPING_PATIENCE)
+from py.training.detection.load_weights import load_detnet_weights
 import py.training.detection.local_config as local_config
 import wandb
 
@@ -122,6 +123,18 @@ def main():
             f"first (or check the path) before running this.")
 
     model = DetNet.DetNet()
+    # load_detnet_weights() must run BEFORE the phase-1 state_dict is loaded
+    # below, even though its actual weight VALUES get overwritten immediately
+    # after. Why: load_weights.py's _load_conv_bn() dynamically ATTACHES a
+    # .bias Parameter to backbone conv layers that InvertedResidual (py/
+    # training/common/irb.py) builds with bias=False -- Monado's ONNX
+    # baseline export has a bias per conv that this architecture otherwise
+    # lacks. A bare DetNet.DetNet() therefore has fewer parameters than the
+    # phase-1 checkpoint (saved AFTER phase 1's trainer_detection.py did
+    # exactly this), so load_state_dict(strict=True) fails with "Unexpected
+    # key(s)" on every dynamically-added bias. Caught by the AD4_LOADFAST
+    # smoke test on 2026-09-09 before this ever reached the real job.
+    load_detnet_weights(model)
     model = torch.nn.DataParallel(model).to(device)
 
     phase1 = torch.load(PHASE1_CHECKPOINT, map_location=device, weights_only=False)
