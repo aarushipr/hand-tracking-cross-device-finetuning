@@ -28,13 +28,18 @@ in deliberately: that is what an annotator would actually be labelling.
 --clahe adds contrast-limited histogram equalisation as a second condition,
 since a number of the Quest 3 SLAM frames are very dark.
 
-THE CAVEAT THAT MATTERS MOST WHEN READING THE NUMBERS
------------------------------------------------------
-HOT3D's ground truth comes from motion capture and draws the hand/forearm
-boundary one specific way. SAM may reasonably segment the whole visible arm. If
-it does, IoU will be poor for a reason that has nothing to do with segmentation
-quality. ALWAYS look at the overlays written by --save-overlays before trusting
-any aggregate number from this script.
+WHAT THE OVERLAYS SHOWED (2026-09-11)
+-------------------------------------
+SAM does NOT segment whole arms, which was the worry going in. It segments the
+visually distinct hand, fingers and palm, and cuts at the wrist. HOT3D's box
+covers the full motion-capture hand and Section 4.2 then pads it by 15%. So
+SAM's boxes are systematically SMALLER than the ground truth and sit inside it,
+which is why the matched IoU sits just under 0.5 rather than scattering.
+
+That is a convention disagreement, not a localisation failure, and a convention
+disagreement can be corrected with one number. --scale-sweep measures how much
+of the gap a fixed expansion closes, and --gt-margin isolates how much of the
+offset is HOT3D's mocap box versus this project's own 15% padding choice.
 
 Sampling is random across the split with a fixed seed, never a prefix.
 eval_detnet.py's --limit truncates its sample list instead, which on this split
@@ -211,6 +216,18 @@ def main():
     ap.add_argument("--clahe", action="store_true",
                     help="apply CLAHE before SAM, as a second condition")
     ap.add_argument("--frame-stride", type=int, default=5)
+    ap.add_argument("--gt-margin", type=float, default=None,
+                    help="override the ground-truth box margin (Section 4.2 uses "
+                         "0.15). Pass 0.0 to score against the unpadded mocap box, "
+                         "which separates SAM's disagreement with HOT3D from this "
+                         "project's own padding choice.")
+    ap.add_argument("--scale-sweep", default="1.0,1.1,1.2,1.3,1.4,1.5,1.6",
+                    help="comma-separated box expansion factors, applied about "
+                         "each predicted box's centre, re-matched from the same "
+                         "masks so no SAM inference is repeated")
+    ap.add_argument("--out-csv", default=None,
+                    help="per-matched-pair rows, for characterising the offset "
+                         "offline without re-running SAM")
     ap.add_argument("--save-overlays", default=None)
     ap.add_argument("--max-overlays", type=int, default=20)
     ap.add_argument("--out", default=None)
@@ -225,6 +242,9 @@ def main():
         frame_stride=args.frame_stride,
         index_cache_dir=getattr(local_config, "hot3d_index_cache_dir", None),
         augment=False)
+    if args.gt_margin is not None:
+        print(f"[sam] overriding ground-truth margin {ds.margin} -> {args.gt_margin}")
+        ds.margin = args.gt_margin
     print(f"[sam] {len(ds)} candidate samples across {len(seq_dirs)} sequences")
 
     rng = random.Random(args.seed)
@@ -239,15 +259,14 @@ def main():
         os.makedirs(args.save_overlays, exist_ok=True)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if args.clahe else None
 
-    per_device = {}
-    n_gt = n_pred = n_hit = 0
-    ious, saved = [], 0
+    frames = []          # (headset, gt_boxes, pred_boxes) per frame
+    saved = 0
 
     for k, idx in enumerate(idxs):
-        s = raw_sample(ds, idx)
-        if s is None:
+        s_ = raw_sample(ds, idx)
+        if s_ is None:
             continue
-        img, gt_boxes, headset = s
+        img, gt_boxes, headset = s_
         if not gt_boxes:
             continue
 
@@ -259,19 +278,7 @@ def main():
         masks = masks_from_result(res, verbose=(k == 0))
 
         pred_boxes = [b for b in (mask_to_box(m, img.shape[:2]) for m in masks) if b]
-        pairs, miss_gt, extra = match_greedy(gt_boxes, pred_boxes)
-
-        d = per_device.setdefault(headset, {"gt": 0, "pred": 0, "hit": 0, "ious": []})
-        d["gt"] += len(gt_boxes)
-        d["pred"] += len(pred_boxes)
-        n_gt += len(gt_boxes)
-        n_pred += len(pred_boxes)
-        for _, _, v in pairs:
-            ious.append(v)
-            d["ious"].append(v)
-            if v >= args.iou_thresh:
-                n_hit += 1
-                d["hit"] += 1
+        frames.append((headset, gt_boxes, pred_boxes))
 
         if args.save_overlays and saved < args.max_overlays:
             vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -285,7 +292,33 @@ def main():
             saved += 1
 
         if (k + 1) % 25 == 0:
-            print(f"[sam] {k+1}/{len(idxs)} frames, {n_gt} gt, {n_pred} pred, {n_hit} hits")
+            print(f"[sam] {k+1}/{len(idxs)} frames")
+
+    # -----------------------------------------------------------------------
+    # Scoring. Scaling happens here rather than in the loop so the entire sweep
+    # reuses one pass of SAM inference.
+    # -----------------------------------------------------------------------
+
+    def scaled(b, f):
+        cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+        hw, hh = (b[2] - b[0]) / 2.0 * f, (b[3] - b[1]) / 2.0 * f
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def evaluate(scale):
+        acc = {}
+        pairs_out = []
+        for headset, gt_boxes, pred_boxes in frames:
+            pb = [scaled(b, scale) for b in pred_boxes]
+            pairs, _, _ = match_greedy(gt_boxes, pb)
+            d = acc.setdefault(headset, {"gt": 0, "pred": 0, "hit": 0, "ious": []})
+            d["gt"] += len(gt_boxes)
+            d["pred"] += len(pb)
+            for gi, pi, v in pairs:
+                d["ious"].append(v)
+                if v >= args.iou_thresh:
+                    d["hit"] += 1
+                pairs_out.append((headset, gt_boxes[gi], pb[pi], v))
+        return acc, pairs_out
 
     def block(tag, gt, pred, hit, vals):
         rec = 100.0 * hit / gt if gt else 0.0
@@ -294,7 +327,7 @@ def main():
         md = float(np.median(vals)) if vals else 0.0
         # Matched-pairs mean IoU answers "when SAM finds a hand, how good is the
         # box". It is NOT comparable to eval_detnet.py's mean IoU, which averages
-        # over every ground-truth box including the ones the model missed. This
+        # over every ground-truth box including the ones the model missed. The
         # second figure scores a miss as zero so the two CAN be put side by side.
         mi_all = float(sum(vals) / gt) if gt else 0.0
         print(f"  {tag:10s} gt={gt:5d} pred={pred:5d}  recall {rec:6.2f}%  "
@@ -304,17 +337,61 @@ def main():
                 "precision_pct": prec, "mean_iou_matched": mi, "median_iou": md,
                 "mean_iou_over_all_gt": mi_all}
 
-    print("\n" + "=" * 66)
-    print(f"SAM 3 auto-annotation, prompt={args.prompt!r}, "
-          f"match at IoU >= {args.iou_thresh}, clahe={bool(args.clahe)}")
-    print("=" * 66)
-    summary = {"overall": block("overall", n_gt, n_pred, n_hit, ious), "by_device": {}}
-    for dev, d in sorted(per_device.items()):
-        summary["by_device"][dev] = block(dev, d["gt"], d["pred"], d["hit"], d["ious"])
-    print("=" * 66)
-    print("Look at the overlays before trusting these numbers. If SAM is "
-          "segmenting whole arms rather than hands, low IoU says nothing about "
-          "segmentation quality.")
+    print("\n" + "=" * 78)
+    print(f"SAM 3 auto-annotation, prompt={args.prompt!r}, match at IoU >= "
+          f"{args.iou_thresh}, clahe={bool(args.clahe)}, gt_margin={ds.margin}")
+    print("=" * 78)
+
+    acc, pairs_out = evaluate(1.0)
+    n_gt = sum(d["gt"] for d in acc.values())
+    n_pred = sum(d["pred"] for d in acc.values())
+    n_hit = sum(d["hit"] for d in acc.values())
+    all_ious = [v for d in acc.values() for v in d["ious"]]
+    summary = {"uncorrected": {"overall": block("overall", n_gt, n_pred, n_hit, all_ious),
+                               "by_device": {}}}
+    for dev, d in sorted(acc.items()):
+        summary["uncorrected"]["by_device"][dev] = block(dev, d["gt"], d["pred"], d["hit"], d["ious"])
+
+    # How much smaller is a SAM box than the ground-truth box it matched?
+    if pairs_out:
+        wr = [ (p[2] - p[0]) / (g[2] - g[0]) for _, g, p, _ in pairs_out if g[2] > g[0] ]
+        hr = [ (p[3] - p[1]) / (g[3] - g[1]) for _, g, p, _ in pairs_out if g[3] > g[1] ]
+        print(f"\n  SAM box size relative to ground truth, matched pairs only")
+        print(f"    width  ratio  mean {np.mean(wr):.3f}  median {np.median(wr):.3f}")
+        print(f"    height ratio  mean {np.mean(hr):.3f}  median {np.median(hr):.3f}")
+        summary["size_ratio"] = {"width_mean": float(np.mean(wr)),
+                                 "width_median": float(np.median(wr)),
+                                 "height_mean": float(np.mean(hr)),
+                                 "height_median": float(np.median(hr))}
+
+    print(f"\n  Fixed-expansion sweep (same masks, boxes scaled about their centre)")
+    print(f"  {'scale':>6}  {'recall%':>8}  {'precision%':>10}  {'IoU(matched)':>12}  {'IoU(all GT)':>11}")
+    sweep = {}
+    for f in [float(x) for x in args.scale_sweep.split(",")]:
+        a, _ = evaluate(f)
+        g = sum(d["gt"] for d in a.values())
+        p_ = sum(d["pred"] for d in a.values())
+        h = sum(d["hit"] for d in a.values())
+        v = [x for d in a.values() for x in d["ious"]]
+        rec = 100.0 * h / g if g else 0.0
+        prec = 100.0 * h / p_ if p_ else 0.0
+        mi = float(np.mean(v)) if v else 0.0
+        mi_all = float(sum(v) / g) if g else 0.0
+        print(f"  {f:6.2f}  {rec:8.2f}  {prec:10.2f}  {mi:12.4f}  {mi_all:11.4f}")
+        sweep[f"{f:.2f}"] = {"recall_pct": rec, "precision_pct": prec,
+                             "mean_iou_matched": mi, "mean_iou_over_all_gt": mi_all}
+    summary["scale_sweep"] = sweep
+    print("=" * 78)
+
+    if args.out_csv:
+        import csv as _csv
+        with open(args.out_csv, "w", newline="") as f_:
+            w = _csv.writer(f_)
+            w.writerow(["device", "gt_x0", "gt_y0", "gt_x1", "gt_y1",
+                        "sam_x0", "sam_y0", "sam_x1", "sam_y1", "iou"])
+            for dev, g, p_, v in pairs_out:
+                w.writerow([dev, *[f"{x:.2f}" for x in g], *[f"{x:.2f}" for x in p_], f"{v:.4f}"])
+        print(f"[sam] wrote {args.out_csv}")
 
     if args.out:
         summary["config"] = vars(args)
