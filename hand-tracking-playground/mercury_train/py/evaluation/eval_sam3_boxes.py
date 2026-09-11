@@ -56,7 +56,7 @@ import cv2
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_MERCURY_TRAIN_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
+_MERCURY_TRAIN_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 for _p in (_MERCURY_TRAIN_ROOT, os.path.join(_MERCURY_TRAIN_ROOT, "py", "training", "detection")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -292,10 +292,17 @@ def main():
         prec = 100.0 * hit / pred if pred else 0.0
         mi = float(np.mean(vals)) if vals else 0.0
         md = float(np.median(vals)) if vals else 0.0
+        # Matched-pairs mean IoU answers "when SAM finds a hand, how good is the
+        # box". It is NOT comparable to eval_detnet.py's mean IoU, which averages
+        # over every ground-truth box including the ones the model missed. This
+        # second figure scores a miss as zero so the two CAN be put side by side.
+        mi_all = float(sum(vals) / gt) if gt else 0.0
         print(f"  {tag:10s} gt={gt:5d} pred={pred:5d}  recall {rec:6.2f}%  "
-              f"precision {prec:6.2f}%  mean IoU {mi:.4f}  median {md:.4f}")
+              f"precision {prec:6.2f}%  IoU(matched) {mi:.4f}  median {md:.4f}  "
+              f"IoU(all GT) {mi_all:.4f}")
         return {"gt": gt, "pred": pred, "hits": hit, "recall_pct": rec,
-                "precision_pct": prec, "mean_iou": mi, "median_iou": md}
+                "precision_pct": prec, "mean_iou_matched": mi, "median_iou": md,
+                "mean_iou_over_all_gt": mi_all}
 
     print("\n" + "=" * 66)
     print(f"SAM 3 auto-annotation, prompt={args.prompt!r}, "
