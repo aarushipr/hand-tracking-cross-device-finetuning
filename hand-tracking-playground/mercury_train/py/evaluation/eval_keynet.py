@@ -185,6 +185,8 @@ SPLIT_CHOICES = [
     "val_mixed", "test_mixed",
     # Archived Aria-only-training / cross-device-evaluation design.
     "val", "test_aria", "test_quest", "device_shift_quest", "cross_device_test",
+    # Everything with usable ground truth, both devices.
+    "all_labeled",
 ]
 
 
