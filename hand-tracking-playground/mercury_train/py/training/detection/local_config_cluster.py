@@ -24,4 +24,5 @@ hot3d_index_cache_dir = "/storage/user/praa/scratch/hot3d_detection_index"
 phanesim_dataset_roots = [
     "/storage/user/praa/phanesim_dataset/dataset",
     "/storage/user/praa/phanesim_dataset/dataset2",
+    "/storage/user/praa/phanesim_dataset/dataset3",
 ]
