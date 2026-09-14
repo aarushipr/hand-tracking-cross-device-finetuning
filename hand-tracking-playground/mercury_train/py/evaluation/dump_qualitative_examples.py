@@ -203,7 +203,14 @@ def render_keynet(args):
                 image, torch.flatten(pred_kp, start_dim=1), pred_valid)
         pred_xy = decode_xy(model_xy).squeeze(0).cpu().numpy()          # (21,2) crop px
         gt_xy = doct["gt_joint_locs"][:, :2].cpu().numpy()              # (21,2) crop px
-        valid = doct["xy_valid_per_joint"].bool().cpu().numpy()          # (21,)
+        # dataset[idx] returns some fields as plain numpy arrays that only
+        # become tensors once a DataLoader's default_collate touches them
+        # (which is how eval_keynet.py's own evaluate() gets away with
+        # .to(device).bool() on this same field) -- indexing the dataset
+        # directly here skips that, so xy_valid_per_joint arrives as a
+        # numpy array with no .bool() method. np.asarray().astype(bool)
+        # works whichever type it actually is.
+        valid = np.asarray(doct["xy_valid_per_joint"]).astype(bool)      # (21,)
         crop_img = doct["input_image"].squeeze(0).cpu().numpy()          # (128,128)
         return crop_img, gt_xy, pred_xy, valid
 
