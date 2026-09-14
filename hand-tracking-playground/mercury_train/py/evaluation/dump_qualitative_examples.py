@@ -64,13 +64,17 @@ def _save(img, out_dir, fname):
 # ---------------------------------------------------------------------------
 
 def render_detnet(args):
-    from eval_detnet import build_model, Hot3dRawFrameSource, sequence_dirs_for_split
+    from eval_detnet import (build_model, Hot3dRawFrameSource, sequence_dirs_for_split,
+                             _MERCURY_TRAIN_ROOT)
     import preprocess_baseline as pp
     import local_config_cluster as lc
 
     dataset_root = args.dataset_root or lc.hot3d_dataset_root
     repo_root = args.hot3d_repo_root or lc.hot3d_repo_root
-    models_dir = args.models_dir or os.path.join(_THIS_DIR, "..", "..", "..", "hand-tracking-models")
+    # Reuses eval_detnet.py's own _MERCURY_TRAIN_ROOT and exact default formula
+    # rather than re-deriving the relative path here, since a hand-counted
+    # "../../.." was one level short and pointed at the wrong directory.
+    models_dir = args.models_dir or os.path.join(_MERCURY_TRAIN_ROOT, "..", "..", "hand-tracking-models")
 
     seq_dirs = sequence_dirs_for_split(dataset_root, args.split)
     if not seq_dirs:

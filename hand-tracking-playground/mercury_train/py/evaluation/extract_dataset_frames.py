@@ -43,30 +43,58 @@ def _to_disp(gray):
 # ---------------------------------------------------------------------------
 
 def extract_hot3d(args):
+    import random
     from eval_detnet import Hot3dRawFrameSource, sequence_dirs_for_split
     import preprocess_baseline as pp
     import local_config_cluster as lc
+    import py.training.common.hot3d_split as hot3d_split
 
     dataset_root = args.dataset_root or lc.hot3d_dataset_root
     repo_root = args.hot3d_repo_root or lc.hot3d_repo_root
 
-    seq_dirs = sequence_dirs_for_split(dataset_root, args.split)
-    if not seq_dirs:
+    all_seq_dirs = sequence_dirs_for_split(dataset_root, args.split)
+    if not all_seq_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under {dataset_root}")
-    source_data = Hot3dRawFrameSource(seq_dirs, repo_root, args.min_visibility_ratio, None)
-    n = len(source_data)
-    print(f"[extract_dataset_frames] {n} (frame, camera-stream) samples")
 
+    # headset_of() reads one small metadata.json per sequence, no .vrs
+    # opened, so sorting the whole split by device costs seconds.
+    # Hot3dRawFrameSource, by contrast, opens each sequence's multi-GB .vrs
+    # recording to build its frame index -- THAT is what was slow before,
+    # because it ran across every sequence in the split just to save a
+    # handful of frames. Restrict it to a couple of sequences per device
+    # instead, chosen randomly, and only those get indexed.
     devices = args.devices
-    per_device_seen_seqs = {d: set() for d in devices}
+    random.seed(args.seed)
+    by_device = {}
+    for d in all_seq_dirs:
+        dev = hot3d_split.headset_of(d)
+        if dev is not None:
+            by_device.setdefault(dev, []).append(d)
+
+    chosen_seq_dirs = []
+    for dev in devices:
+        pool = by_device.get(dev, [])
+        if not pool:
+            print(f"  WARNING: no sequences found for device {dev!r} in split "
+                  f"{args.split!r} (check the spelling against what "
+                  f"hot3d_split.headset_of returns for this dataset)")
+            continue
+        k = min(len(pool), max(1, args.seqs_per_device))
+        chosen_seq_dirs.extend(random.sample(pool, k))
+
+    print(f"[extract_dataset_frames] indexing {len(chosen_seq_dirs)} of "
+          f"{len(all_seq_dirs)} sequences in the split")
+    source_data = Hot3dRawFrameSource(chosen_seq_dirs, repo_root, args.min_visibility_ratio, None)
+    n = len(source_data)
+    print(f"[extract_dataset_frames] {n} (frame, camera-stream) samples in the "
+          f"chosen sequences")
+
     per_device_saved = {d: 0 for d in devices}
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # Evenly-spaced stride rather than a scan from idx 0, and at most one
-    # saved frame per (device, sequence), so the examples come from
-    # different clips instead of all being consecutive frames of one.
-    stride = max(1, n // max(1, args.per_device * len(devices) * 40))
-    for idx in range(0, n, stride):
+    order = list(range(n))
+    random.shuffle(order)
+    for idx in order:
         if all(per_device_saved[d] >= args.per_device for d in devices):
             break
         seq_name, headset, stream_id, ts, image, gt_boxes = source_data.get(idx)
@@ -74,24 +102,20 @@ def extract_hot3d(args):
             continue
         if per_device_saved[headset] >= args.per_device:
             continue
-        if seq_name in per_device_seen_seqs[headset]:
-            continue
         orientation = pp.DEVICE_ORIENTATION.get(headset, 270)
         upright = pp.rotate_upright(image, orientation)
         disp = _to_disp(upright)
         fname = f"hot3d_{headset}_{seq_name}_idx{idx}.png"
         cv2.imwrite(os.path.join(args.out_dir, fname), disp)
         print(f"  wrote {fname}")
-        per_device_seen_seqs[headset].add(seq_name)
         per_device_saved[headset] += 1
 
     for d in devices:
         if per_device_saved[d] < args.per_device:
             print(f"  WARNING: only found {per_device_saved[d]}/{args.per_device} "
-                  f"frames for device {d!r} at stride {stride}. Either that device "
-                  f"name doesn't appear in this split (check spelling against the "
-                  f"headset values eval_detnet.py reports), or a smaller stride is "
-                  f"needed -- rerun with --min-visibility-ratio 0 to widen the pool.")
+                  f"frames for device {d!r} among the {args.seqs_per_device} sampled "
+                  f"sequences. Rerun with a larger --seqs-per-device, or "
+                  f"--min-visibility-ratio 0 to widen the pool within those sequences.")
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +174,10 @@ def main():
     parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--hot3d-repo-root", default=None)
+    parser.add_argument("--seqs-per-device", type=int, default=2,
+                        help="how many sequences per device to open .vrs files for; "
+                             "keep this small, it's the slow part")
+    parser.add_argument("--seed", type=int, default=0)
     # Phanesim
     parser.add_argument("--num-frames", type=int, default=3)
     parser.add_argument("--frame-index", type=int, default=0)
