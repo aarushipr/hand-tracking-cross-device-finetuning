@@ -24,6 +24,13 @@ import numpy as np
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
+# local_config_cluster.py (used by both extract_hot3d, via eval_detnet, and
+# extract_phanesim directly) lives in training/detection, not here. eval_detnet
+# adds this itself on import, but extract_phanesim never imports eval_detnet,
+# so this script adds it unconditionally rather than relying on that.
+_DETECTION_DIR = os.path.join(_THIS_DIR, "..", "training", "detection")
+if _DETECTION_DIR not in sys.path:
+    sys.path.insert(0, _DETECTION_DIR)
 
 
 def _to_disp(gray):
