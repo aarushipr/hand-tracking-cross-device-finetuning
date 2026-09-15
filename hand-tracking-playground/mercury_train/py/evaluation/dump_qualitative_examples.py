@@ -186,6 +186,13 @@ def render_keynet(args):
     if not sequence_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under "
                          f"{local_config.hot3d_dataset_root}")
+    if args.sequences:
+        wanted = set(args.sequences)
+        sequence_dirs = [d for d in sequence_dirs if os.path.basename(os.path.normpath(d)) in wanted]
+        if not sequence_dirs:
+            raise SystemExit(f"None of {args.sequences!r} found in split {args.split!r}")
+        print(f"[dump_qualitative] restricted to {len(sequence_dirs)} sequence(s): "
+              f"{[os.path.basename(os.path.normpath(d)) for d in sequence_dirs]}")
     dataset = HOT3DKeypointDataset(
         sequence_dirs=sequence_dirs,
         hot3d_repo_root=local_config.hot3d_repo_root,
