@@ -246,7 +246,7 @@ def render_keynet(args):
     scored = []
     for idx in range(n):
         crop_img, gt_xy, pred_xy, valid = predict(idx)
-        if not valid.any():
+        if valid.sum() < args.min_valid_joints:
             continue
         err = np.linalg.norm(pred_xy - gt_xy, axis=-1)
         scored.append((idx, float(err[valid].mean())))
@@ -292,6 +292,9 @@ def main():
     parser.add_argument("--hot3d-repo-root", default=None)
     # KeyNet-only
     parser.add_argument("--frame-stride", type=int, default=5)
+    parser.add_argument("--min-valid-joints", type=int, default=15,
+                        help="skip frames with fewer than this many visible GT joints "
+                             "when ranking (avoids near-empty crops dominating worst/best)")
     args = parser.parse_args()
 
     if not (args.frame_indices or args.rank_worst or args.rank_best):
