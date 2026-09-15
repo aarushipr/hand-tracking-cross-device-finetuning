@@ -253,14 +253,17 @@ def render_keynet(args):
         if idx % 200 == 0:
             print(f"  scoring {idx}/{n}", flush=True)
 
+    # Ascending by pixel error, so index 0 is the LOWEST error (best), unlike
+    # DetNet's IoU-based ranking above where ascending-first is worst -- error
+    # and IoU point opposite directions, so this can't reuse that slicing.
     scored.sort(key=lambda t: t[1])
     if args.rank_worst:
         print(f"[dump_qualitative] rendering {args.rank_worst} worst samples")
-        for idx, e in scored[:args.rank_worst]:
+        for idx, e in scored[-args.rank_worst:][::-1]:
             draw_and_save(idx, "worst")
     if args.rank_best:
         print(f"[dump_qualitative] rendering {args.rank_best} best samples")
-        for idx, e in scored[-args.rank_best:][::-1]:
+        for idx, e in scored[:args.rank_best]:
             draw_and_save(idx, "best")
 
 
