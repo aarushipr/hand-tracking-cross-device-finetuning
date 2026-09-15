@@ -79,6 +79,13 @@ def render_detnet(args):
     seq_dirs = sequence_dirs_for_split(dataset_root, args.split)
     if not seq_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under {dataset_root}")
+    if args.sequences:
+        wanted = set(args.sequences)
+        seq_dirs = [d for d in seq_dirs if os.path.basename(os.path.normpath(d)) in wanted]
+        if not seq_dirs:
+            raise SystemExit(f"None of {args.sequences!r} found in split {args.split!r}")
+        print(f"[dump_qualitative] restricted to {len(seq_dirs)} sequence(s): "
+              f"{[os.path.basename(os.path.normpath(d)) for d in seq_dirs]}")
     source_data = Hot3dRawFrameSource(seq_dirs, repo_root, args.min_visibility_ratio, None)
     print(f"[dump_qualitative] {len(source_data)} (frame, camera-stream) samples")
 
@@ -287,6 +294,9 @@ def main():
                         help="cap the ranking pass to the first N samples, for a smoke test")
     # DetNet-only
     parser.add_argument("--min-visibility-ratio", type=float, default=0.2)
+    parser.add_argument("--sequences", nargs="+", default=None,
+                        help="restrict to these sequence names (e.g. P0001_10a27bf7), "
+                             "skipping the VRS-open cost for the rest of the split")
     parser.add_argument("--models-dir", default=None)
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--hot3d-repo-root", default=None)
