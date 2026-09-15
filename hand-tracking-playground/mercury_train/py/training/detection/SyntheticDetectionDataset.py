@@ -22,7 +22,7 @@ class SyntheticDetectionDataset(torch.utils.data.Dataset):
 
     Why this exists: as originally written, DetNet trained on 100% real
     data (HMDHandRects + EgoHands + EpicKitchens) with zero synthetic
-    exposure -- meaning DetNet's ability to generalize to a new XR device
+    exposure, meaning DetNet's ability to generalize to a new XR device
     had nothing to do with the thesis's actual method (camera-randomized
     synthetic training). This gives DetNet the same synthetic training
     path KeyNet already has, so real sources can move to val/test instead
@@ -33,14 +33,14 @@ class SyntheticDetectionDataset(torch.utils.data.Dataset):
     pinhole model using camera_info.csv's per-frame fx/fy/cx/cy, and take
     the min/max extent (+ margin) as the bbox. Verified against real
     rendered frames by overlaying the projected points and bbox on the
-    actual image before wiring this in -- projection lines up tightly with
+    actual image before wiring this in, projection lines up tightly with
     the visible hand.
 
     Handedness: the generator only ever renders one hand per frame with no
     handedness label, so the projected bbox is always placed in slot 0.
     This is fine because augmentation.augment_image() already does a
-    random horizontal flip that swaps the left/right bbox slots -- see its
-    `if flip:` block -- so this still produces a left/right-balanced
+    random horizontal flip that swaps the left/right bbox slots; see its
+    `if flip:` block; so this still produces a left/right-balanced
     training signal without needing to invent a labeling scheme here.
     """
 
@@ -74,8 +74,7 @@ class SyntheticDetectionDataset(torch.utils.data.Dataset):
 
         im = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         if im is None:
-            # Same resilience approach as ArtificialData.py's __getitem__ --
-            # one corrupt frame shouldn't kill an unattended multi-hour job.
+            # One corrupt frame shouldn't kill an unattended multi-hour job.
             print(f"[SyntheticDetectionDataset] WARNING: failed to load {img_path}. "
                   f"Substituting a random sample.")
             if retries_left <= 0:
@@ -88,23 +87,18 @@ class SyntheticDetectionDataset(torch.utils.data.Dataset):
 
         cam = self.camera_poses_seq_array[seq_idx, frame_idx]
         cam_pos = cam[0:3]
-        cam_quat = cam[3:7]  # x, y, z, w -- matches camera_info.csv column order
+        cam_quat = cam[3:7]  # x, y, z, w; matches camera_info.csv column order
         fx, fy, cx, cy = cam[7], cam[8], cam[9], cam[10]
 
         joints = self.hand_poses_seq_array[seq_idx, frame_idx].reshape(26, 7)
-        # Joints 0-24 are the 25 hand joints; joint 25 is the elbow and is
-        # deliberately excluded here -- it's frequently well outside the
-        # hand's region (sometimes off-frame), same 25-vs-26 split
-        # cpp/dataloader/dataloader_pybind.cpp uses (hand25_2d vs hand26,
-        # hand[25] used as elbow in pront()). Including it would blow the
-        # bbox out to cover empty background between hand and elbow.
+        # Joints 0-24 are the hand; joint 25 is the elbow and is excluded.
+        # Including it would blow the bbox out over empty background.
         joints_global = joints[0:25, 0:3]
 
         cam_rot_inv = R.from_quat(cam_quat).inv()
         joints_local = cam_rot_inv.apply(joints_global - cam_pos)
 
-        # Camera looks down -Z (OpenXR/Monado convention, matches this
-        # generator's cpp/dataloader code) -- forward distance is -z.
+        # Camera looks down -Z (OpenXR/Monado convention), so forward distance is -z.
         depth = -joints_local[:, 2]
         depth = np.where(np.abs(depth) < 1e-6, 1e-6, depth)  # guard divide-by-zero
         u = cx + fx * (joints_local[:, 0] / depth)
@@ -119,7 +113,7 @@ class SyntheticDetectionDataset(torch.utils.data.Dataset):
         y1 += h * self.margin
 
         b = bbox((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0)
-        # Always slot 0 (left) -- see class docstring re: handedness.
+        # Always slot 0 (left); see class docstring re: handedness.
         bbox_list = [b, None]
 
         e = ImageWithBoundingBoxes(image=im, bboxes=bbox_list)

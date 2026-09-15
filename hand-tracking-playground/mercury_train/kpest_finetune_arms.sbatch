@@ -30,7 +30,7 @@
 # a rounding error on it. The first epochs of the smoke test / real run will say
 # by how much. If HOT3D validation turns out to cost more than the training
 # epoch itself, the fix is to validate HOT3D every Nth epoch rather than to drop
-# it -- ask before changing it, since the per-epoch HOT3D curve is what the
+# it; ask before changing it, since the per-epoch HOT3D curve is what the
 # thesis reports.
 #
 # The HOT3D keypoint index cache is warm at frame_stride=5 (294 stride5__v3
@@ -49,7 +49,7 @@ export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/openc
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 
-# Required -- without it visualizer.py's periodic display_and_log_output()
+# Required: without it visualizer.py's periodic display_and_log_output()
 # calls cv2.imshow and crashes on the headless cluster (job 1700705).
 export AD4_ENABLEGUI=0
 

@@ -165,14 +165,8 @@ class AugmentationMaker:
         self.ccrop = transforms.CenterCrop(
             size=(self.output_size, self.output_size))
 
-        # Was hardcoded to a machine-specific path ("/3/epics/gk3/indoor/...")
-        # that doesn't exist here, and the file's contents were never
-        # actually read into backgrounds_list anyway (this block always
-        # produced an empty list even when the open succeeded, on whatever
-        # machine originally had that path). Leaving it empty is
-        # behaviorally identical to before, just without crashing on
-        # machines that don't have that exact path — get_rotate_scale_background
-        # below falls back to a neutral background when this list is empty.
+        # The hardcoded path doesn't exist here and its contents were never read anyway.
+        # An empty list is behaviourally identical; get_rotate_scale_background falls back.
         self.backgrounds_list = []
 
     def make_heatmap_output(self,
@@ -337,12 +331,8 @@ class AugmentationMaker:
 
     def get_rotate_scale_background(self):
         if not self.backgrounds_list:
-            # No indoor background images configured on this machine —
-            # fall back to a plain zero background instead of crashing on
-            # random.choice([]). Background compositing just won't add
-            # domain diversity until real background images are sourced
-            # and indoor_backgrounds_path is wired up to actually populate
-            # backgrounds_list (it currently doesn't, see __init__).
+            # No indoor backgrounds configured, so fall back to zeros not random.choice([]).
+            # Compositing adds no diversity until indoor_backgrounds_path is wired up.
             return np.zeros(
                 (self.aug_config.output_size, self.aug_config.output_size),
                 dtype=np.float32)

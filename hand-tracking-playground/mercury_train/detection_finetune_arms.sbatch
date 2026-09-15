@@ -15,7 +15,7 @@
 # combination is and why AD4_INIT also selects the hyperparameters.
 #
 # THE RUN THE SUPERVISOR ASKED FOR (2026-09-09): Monado's shipped weights
-# fine-tuned on Phanesim, evaluated on HOT3D alongside the untouched weights --
+# fine-tuned on Phanesim, evaluated on HOT3D alongside the untouched weights;
 #   sbatch --export=ALL,AD4_INIT=default,AD4_ARM=phanesim \
 #          --job-name=xr-detection-monado-phanesim detection_finetune_arms.sbatch
 # AD4_INIT defaults to "default" and AD4_ARM to "phanesim", so a bare

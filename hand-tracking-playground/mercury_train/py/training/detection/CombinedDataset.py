@@ -31,17 +31,10 @@ class CombinedDataset(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
-        # Primary training source: same synthetic generator KeyNet already
-        # trains on, with bboxes derived from the 3D hand joints (see
-        # SyntheticDetectionDataset's docstring for the projection method
-        # and why it's trustworthy). This means DetNet now trains under the
-        # same camera-randomization regime as KeyNet instead of depending
-        # entirely on real, hard-to-source datasets for a training signal
-        # at all -- those move to val/test below, and are optional.
+        # Primary source: the synthetic generator KeyNet trains on, boxes from the 3D joints.
         synthetic_path = getattr(local_config, "artificial_dataset_path", None)
         if synthetic_path and os.path.isdir(synthetic_path):
-            # Highest weight -- this is the primary training source now,
-            # matching KeyNet's synthetic-first design.
+            # Highest weight: the primary source, matching KeyNet's synthetic-first design.
             b(SyntheticDetectionDataset(), 4)
         else:
             print("[CombinedDataset] Skipping synthetic detection data — "
@@ -49,14 +42,10 @@ class CombinedDataset(torch.utils.data.Dataset):
                   "DetNet will have no training signal unless a real source "
                   "below is available.")
 
-        # Real sources below are now val/test-oriented, not training
-        # blockers. Each is skipped individually (rather than the whole
-        # thing crashing on the first missing path) so training can start
-        # on whatever's actually available as data sources get located.
+        # Real sources are val/test-oriented now; each is skipped individually if missing.
         hmdhandrect_datasets = []
         hmdhandrect_root = local_config.hmdhandrects_location
-        # subject02 sequences are held out as the validation set.
-        # They must never appear here — adding them would contaminate evaluation.
+        # subject02 is the validation set; adding it here would contaminate evaluation.
         for seq_name in [
             "train_subject00_sequence00",
             "train_subject00_sequence01",
@@ -73,21 +62,20 @@ class CombinedDataset(torch.utils.data.Dataset):
                 print(f"[CombinedDataset] Skipping HMDHandRects {seq_name} — not found at {ann_path}")
 
         if hmdhandrect_datasets:
-            # HMDHandRects: egocentric XR — the most device-relevant data, weight up.
+            # HMDHandRects: egocentric XR; the most device-relevant data, weight up.
             b(torch.utils.data.ConcatDataset(hmdhandrect_datasets), 3)
         else:
             print("[CombinedDataset] Skipping HMDHandRects entirely — no sequences found")
 
         egohands_labels_dir = os.path.join(local_config.egohands_convert, "labels", "train")
         if os.path.isdir(egohands_labels_dir):
-            # EgoHands: egocentric but not XR hardware — still useful, moderate weight.
+            # EgoHands: egocentric but not XR hardware, still useful, moderate weight.
             b(DarknetDataset(local_config.egohands_convert), 1)
         else:
             print(f"[CombinedDataset] Skipping EgoHands — not found at {egohands_labels_dir}")
 
         if os.path.isdir(local_config.kitchens_annotations) and os.path.isdir(local_config.kitchens_images):
-            # EpicKitchens: GoPro chest-mounted — wrong device type for XR generalisation.
-            # Kept for diversity but weight reduced so it doesn't dominate training.
+            # EpicKitchens: GoPro chest-mounted, wrong device type; kept for diversity, low weight.
             b(EpicKitchensDataset(), 2)
         else:
             print(f"[CombinedDataset] Skipping EpicKitchens — not found at "

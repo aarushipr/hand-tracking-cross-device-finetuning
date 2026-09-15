@@ -10,7 +10,7 @@
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# Smoke test ONLY -- AD4_LOADFAST=1, 2 train clips + 1 val clip, capped at 2
+# Smoke test ONLY; AD4_LOADFAST=1, 2 train clips + 1 val clip, capped at 2
 # epochs, writes to checkpoints_loadfast/. Exists purely to prove
 # trainer_detection_phanesim.py runs end to end (loads the phase-1
 # checkpoint, trains, validates, saves a checkpoint) before the real

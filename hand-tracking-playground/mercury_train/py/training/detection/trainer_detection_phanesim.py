@@ -1,28 +1,9 @@
 """
-trainer_detection_phanesim.py -- DetNet fine-tuning PHASE 2: continues
-training from the phase-1 HOT3D fine-tuned checkpoint
-(checkpoints_train_mixed/checkpoint_best.pth) using Phanesim's synthetic
-data instead of HOT3D. Kept as a separate script rather than folded into
-trainer_detection.py so phase 1 stays runnable/reproducible unchanged, and
-so this can never accidentally overwrite the phase-1 checkpoint that the
-already-submittable thesis draft's numbers are based on.
-
-Per-thesis decision (2026-09-08): Phanesim only, no HOT3D mixed in, both
-`dataset` and `dataset2` batches pooled. This carries a real catastrophic-
-forgetting risk -- continuing to fine-tune on a second, fully synthetic
-dataset with none of the just-learned real HOT3D signal mixed back in could
-degrade what phase 1 achieved, including the cross-device consistency
-Chapter 6 found for DetNet. That is exactly why this should be run as a
-time-boxed TRIAL first -- re-run eval_detnet.py against test_mixed on this
-phase's checkpoint_best.pth and compare against the phase-1 numbers before
-committing to a full run.
-
-Reuses train_batch/validate_epoch/set_train_mode/save_checkpoint from
-trainer_detection.py unchanged -- they're not HOT3D-specific, and
-PhanesimDetectionDataset's __getitem__ produces the exact same batch dict
-shape (image/exists/center_x/center_y/size), so there is no reason to fork
-that logic and risk the two phases silently diverging in how loss is
-computed.
+DetNet fine-tuning phase 2: continues from the phase-1 HOT3D checkpoint on
+Phanesim's synthetic data. Separate from trainer_detection.py so phase 1 stays
+reproducible and its checkpoint cannot be overwritten. Phanesim only, no HOT3D
+mixed in, which carries a real catastrophic-forgetting risk: run it time-boxed and
+compare eval_detnet.py on test_mixed before committing to a full run.
 """
 
 import os
@@ -46,17 +27,10 @@ import wandb
 modelinputW = header.model_input_width
 modelinputH = header.model_input_height
 
-# Every 20th clip (~5%) held out for validation, interleaved across the full
-# combined clip list rather than taken from the tail -- dataset_roots is
-# [dataset, dataset2], and a plain tail-slice would put nearly all of
-# validation inside whichever root happens to be listed last instead of
-# spreading it across both.
+# Every 20th clip held out, interleaved: a tail slice would land in one root only.
 VAL_CLIP_STRIDE = 20
 
-# Phase-1 checkpoint this phase continues from. Relative to this script's
-# own directory, matching trainer_detection.py's own checkpoint_dir
-# convention -- not an absolute path, so this still works if the repo is
-# ever cloned somewhere else.
+# Phase-1 checkpoint to continue from, relative to this script's directory.
 PHASE1_CHECKPOINT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "checkpoints_train_mixed", "checkpoint_best.pth")
@@ -87,13 +61,7 @@ def main():
     val_clip_set = set(val_clips)
     train_clips = [c for c in all_clips if c not in val_clip_set]
 
-    # loadfast is a smoke test: prove phase 2's pipeline runs end to end in
-    # minutes -- loading the real phase-1 checkpoint, running a couple of
-    # real phanesim clips through training and validation, and writing a
-    # real checkpoint -- not produce a model worth keeping. Mirrors
-    # trainer_detection.py's own AD4_LOADFAST path; writes to
-    # checkpoints_loadfast_phanesim/ so it can never collide with or be mistaken for
-    # a real checkpoints_phanesim_phase2/ run.
+    # loadfast is a smoke test, not a model worth keeping; writes to its own dir.
     loadfast = bool(int(os.environ.get("AD4_LOADFAST", "0")))
     if loadfast:
         train_clips = train_clips[:2]
@@ -123,17 +91,7 @@ def main():
             f"first (or check the path) before running this.")
 
     model = DetNet.DetNet()
-    # load_detnet_weights() must run BEFORE the phase-1 state_dict is loaded
-    # below, even though its actual weight VALUES get overwritten immediately
-    # after. Why: load_weights.py's _load_conv_bn() dynamically ATTACHES a
-    # .bias Parameter to backbone conv layers that InvertedResidual (py/
-    # training/common/irb.py) builds with bias=False -- Monado's ONNX
-    # baseline export has a bias per conv that this architecture otherwise
-    # lacks. A bare DetNet.DetNet() therefore has fewer parameters than the
-    # phase-1 checkpoint (saved AFTER phase 1's trainer_detection.py did
-    # exactly this), so load_state_dict(strict=True) fails with "Unexpected
-    # key(s)" on every dynamically-added bias. Caught by the AD4_LOADFAST
-    # smoke test on 2026-09-09 before this ever reached the real job.
+    # load_detnet_weights() first: it attaches the .bias params a strict load needs.
     load_detnet_weights(model)
     model = torch.nn.DataParallel(model).to(device)
 
@@ -143,8 +101,7 @@ def main():
           f"{PHASE1_CHECKPOINT} (phase-1 epoch {phase1.get('epoch')}, "
           f"phase-1 best val loss {phase1.get('best_validation_loss')})")
 
-    # Same backbone-frozen setup as phase 1 -- only the head continues
-    # training, keeping the two phases methodologically consistent.
+    # Same backbone-frozen setup as phase 1; only the head continues training.
     for param in model.module.backbone.parameters():
         param.requires_grad = False
     model.module.backbone.eval()
@@ -154,28 +111,17 @@ def main():
 
     loss_fn = torch.nn.MSELoss(reduction="mean").to(device)
 
-    # Deliberately NOT resuming epoch/optimizer state from the phase-1
-    # checkpoint -- this is a new training phase on a different data source,
-    # not a continuation of the same run, so it starts its own epoch count
-    # and a fresh optimizer (phase 1's Adam moment estimates were tuned for
-    # HOT3D's loss landscape, not phanesim's).
+    # Deliberately not resuming epoch/optimizer state: a new phase, not a continuation.
     start_epoch = 0
     best_validation_loss = float('inf')
 
-    # A distinct name from trainer_detection.py's own "checkpoints_loadfast"
-    # -- NOT a cosmetic choice. This bug actually happened: an earlier run
-    # here picked up a stale checkpoint.pth already sitting in a shared
-    # checkpoints_loadfast/ dir (left over from HOT3D loadfast testing),
-    # silently "resumed" from its epoch 2, and exited having run zero real
-    # training steps while still printing a success-looking message. Caught
-    # 2026-09-09 by noticing the log had no "Training i/length" lines at all.
+    # Distinct from trainer_detection.py's "checkpoints_loadfast"; sharing it caused a stale resume.
     checkpoint_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "checkpoints_loadfast_phanesim" if loadfast else CHECKPOINT_DIRNAME)
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
-    # Still allow resuming THIS phase's own training if it gets preempted
-    # partway through -- same pattern as trainer_detection.py.
+    # Still allow resuming this phase if it gets preempted partway through.
     if os.path.exists(checkpoint_file):
         checkpoint = torch.load(checkpoint_file, map_location=device, weights_only=False)
         if 'best_validation_loss' in checkpoint:
@@ -188,7 +134,7 @@ def main():
 
     epochs_without_improvement = 0
 
-    # Hard cap at 2 epochs under loadfast regardless of early stopping --
+    # Hard cap at 2 epochs under loadfast regardless of early stopping,
     # with only 2-3 tiny clips, validation loss could plausibly keep
     # "improving" by noise alone for longer than patience allows, and the
     # whole point of loadfast is a bounded few-minute run.

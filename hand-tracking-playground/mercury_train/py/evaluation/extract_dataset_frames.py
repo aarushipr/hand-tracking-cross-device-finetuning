@@ -1,17 +1,7 @@
 """
-extract_dataset_frames.py -- pull raw example frames from the HOT3D and
-Phanesim datasets, undecorated (no boxes, no model), for a "what does the
-data look like" figure in Chapter 2.
-
-Read-only. Runs no model and does not touch eval_detnet.py, eval_keynet.py,
-or any training/eval code path -- it only reuses their raw-frame readers.
-
-USAGE:
-    python py/evaluation/extract_dataset_frames.py --source hot3d \
-        --split test_mixed --per-device 3 --out-dir qual/ch2_hot3d
-
-    python py/evaluation/extract_dataset_frames.py --source phanesim \
-        --num-frames 3 --out-dir qual/ch2_phanesim
+Pulls raw example frames from HOT3D and Phanesim, undecorated, for the "what does
+the data look like" figure in Chapter 2. Read-only: runs no model and only reuses
+the raw-frame readers. See --help for arguments.
 """
 import argparse
 import glob
@@ -24,10 +14,7 @@ import numpy as np
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
-# local_config_cluster.py (used by both extract_hot3d, via eval_detnet, and
-# extract_phanesim directly) lives in training/detection, not here. eval_detnet
-# adds this itself on import, but extract_phanesim never imports eval_detnet,
-# so this script adds it unconditionally rather than relying on that.
+# local_config_cluster.py lives in training/detection; extract_phanesim needs it here.
 _DETECTION_DIR = os.path.join(_THIS_DIR, "..", "training", "detection")
 if _DETECTION_DIR not in sys.path:
     sys.path.insert(0, _DETECTION_DIR)
@@ -38,9 +25,7 @@ def _to_disp(gray):
     return ((gray - lo) / (hi - lo + 1e-6) * 255).astype(np.uint8)
 
 
-# ---------------------------------------------------------------------------
-# HOT3D
-# ---------------------------------------------------------------------------
+# --- HOT3D ---------------------------------------------------------------------
 
 def extract_hot3d(args):
     import random
@@ -56,13 +41,7 @@ def extract_hot3d(args):
     if not all_seq_dirs:
         raise SystemExit(f"No sequences for split {args.split!r} under {dataset_root}")
 
-    # headset_of() reads one small metadata.json per sequence, no .vrs
-    # opened, so sorting the whole split by device costs seconds.
-    # Hot3dRawFrameSource, by contrast, opens each sequence's multi-GB .vrs
-    # recording to build its frame index -- THAT is what was slow before,
-    # because it ran across every sequence in the split just to save a
-    # handful of frames. Restrict it to a couple of sequences per device
-    # instead, chosen randomly, and only those get indexed.
+    # Hot3dRawFrameSource opens whole .vrs files, so use a couple of sequences per device.
     devices = args.devices
     random.seed(args.seed)
     by_device = {}
@@ -118,9 +97,7 @@ def extract_hot3d(args):
                   f"--min-visibility-ratio 0 to widen the pool within those sequences.")
 
 
-# ---------------------------------------------------------------------------
-# Phanesim
-# ---------------------------------------------------------------------------
+# --- Phanesim ------------------------------------------------------------------
 
 def discover_phanesim_clips(roots):
     clip_dirs = []

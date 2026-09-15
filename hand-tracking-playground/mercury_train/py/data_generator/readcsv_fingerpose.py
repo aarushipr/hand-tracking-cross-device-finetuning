@@ -59,7 +59,7 @@ class fingerpose_csv:
         root = 1 + (joint_idx * 7)
         # X is unchanged, Y is -Z, Z is Y
         # pandas >=2.0 dropped positional fallback for integer keys on a
-        # string-indexed Series (KeyError instead) -- must use .iloc.
+        # string-indexed Series (KeyError instead); must use .iloc.
         p = mathutils.Vector(
             (arr.iloc[root], arr.iloc[root + 1], arr.iloc[root + 2]))
         # p = mathutils.Vector((arr.iloc[root], -arr.iloc[root+2], arr.iloc[root+1]))

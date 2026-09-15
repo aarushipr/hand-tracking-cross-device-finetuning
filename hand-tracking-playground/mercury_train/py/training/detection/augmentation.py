@@ -60,8 +60,8 @@ def augment_image(thing: ImageWithBoundingBoxes, deterministic: bool = False):
     fully-connected head cannot consume.
 
     With deterministic=True the random draws are replaced by the centre of
-    their own distributions -- no flip, no rotation, no centre jitter, and the
-    zoom at the mean of its range -- so a validation sample is a function of
+    their own distributions; no flip, no rotation, no centre jitter, and the
+    zoom at the mean of its range; so a validation sample is a function of
     its index alone and the same frame scores identically every epoch. This
     mirrors HOT3DKeypointDataset's eval_mode, which fixes KeyNet's crop
     rotation at zero and its radius multiplier at the centre of its training
@@ -104,8 +104,7 @@ def augment_image(thing: ImageWithBoundingBoxes, deterministic: bool = False):
     max_amt = origW/origH
     max_amt = max(max_amt, origH/origW)
 
-    # Mean of the training distribution, so the deterministic framing sits at
-    # the centre of what the network saw during training rather than at an edge.
+    # Mean of the training distribution, so deterministic framing sits at its centre.
     amt = (random.uniform(.9, max_amt+0.1) if not deterministic
            else (1.0 + max_amt) / 2)
 
@@ -132,8 +131,7 @@ def augment_image(thing: ImageWithBoundingBoxes, deterministic: bool = False):
 
     bbox_mul = np.linalg.norm([trans[0, 0], trans[1, 0]])
 
-    # The border fill is another random draw: with deterministic=True it is
-    # held at mid-grey, the centre of its 0-255 range.
+    # Border fill is another random draw; deterministic=True holds it at mid-grey.
     border_value = random.randint(0, 255) if not deterministic else 128
     thing.image = cv2.warpAffine(
         img, trans, (header.model_input_width, header.model_input_height),

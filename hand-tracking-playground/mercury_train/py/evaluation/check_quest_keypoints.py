@@ -1,48 +1,9 @@
 """
-Does HOT3DKeypointDataset actually produce usable keypoint ground truth for
-Quest 3 recordings?
-
-WHY THIS EXISTS
----------------
-The mixed Aria+Quest split puts Quest recordings into KeyNet's training and
-evaluation sets. Until that split, KeyNet only ever saw Aria data, so the Quest
-path through this dataset class was never exercised end to end.
-
-Two specific reasons not to assume it works:
-
-1. py/training/common/hot3d_timecode_compat.py -- the shim that makes Quest
-   recordings readable at all -- states in its own "WHAT THIS DOES NOT COVER"
-   section that it was verified against the detection ground truth
-   (box2d_hands.csv) only, and explicitly NOT against the UmeTrack-format
-   keypoint ground truth this dataset reads.
-2. Until this check was written, HOT3DKeypointDataset never applied that shim.
-
-The failure mode this guards against is not a crash. A crash is easy. It is an
-index that silently comes back empty or tiny for every Quest sequence, so
-training quietly proceeds on Aria data wearing a mixed-split label, and the
-reported result describes something other than what the thesis claims.
-
-WHAT IT CHECKS
---------------
-For one sequence:
-  - the index builds and is non-empty
-  - the acceptance rate (kept hands / candidate hands) is not pathological
-  - samples decode: image present, correct shape, not uniformly blank
-  - per-joint validity flags are not all false
-  - projected keypoints land inside the source frame rather than at infinity
-
-Run it on one Quest sequence and one Aria sequence and compare the two. Aria is
-the control: if both look alike, the Quest path is behaving.
-
-USAGE
------
-    python py/evaluation/check_quest_keypoints.py <sequence_dir> [--samples 20]
-
-    # typical use, from the mercury_train root on the cluster:
-    python py/evaluation/check_quest_keypoints.py \
-        /storage/user/praa/hot3d_full_setup/hot3d/hot3d/dataset/P0013_0ec32d10
-
-Exits non-zero if any check fails, so it can gate a job submission.
+Does HOT3DKeypointDataset produce usable Quest 3 keypoint ground truth? The mixed
+split put Quest into KeyNet's sets for the first time, and the TimeCode shim was
+only ever verified against the detection ground truth. The failure mode is a
+silently empty index, not a crash, so run it on one Quest and one Aria sequence
+and compare. Exits non-zero, so it can gate a job submission.
 """
 import argparse
 import os
@@ -78,8 +39,7 @@ def main():
         print("FAIL: no readable metadata.json -- headset_of() returned None.")
         return 1
 
-    # eval_mode=True: deterministic crops, so a failure here is a property of
-    # the data rather than of one random draw.
+    # eval_mode=True: deterministic crops, so a failure is the data, not one draw.
     dataset = HOT3DKeypointDataset(
         sequence_dirs=[seq_dir],
         hot3d_repo_root=local_config.hot3d_repo_root,
@@ -104,8 +64,7 @@ def main():
         failures.append("under 10% of joints have valid 2D positions -- the "
                         "projection is almost certainly wrong for this device")
 
-    # Keypoints should sit in image coordinates, so a plausible range rather
-    # than the huge values a bad projection produces.
+    # Keypoints should sit in image coordinates, not the huge values a bad projection gives.
     kps = dataset._kps[:, :, :2]
     finite = np.isfinite(kps).all()
     print(f"kp range : x [{kps[..., 0].min():.0f}, {kps[..., 0].max():.0f}]  "
@@ -124,8 +83,7 @@ def main():
         failures.append("relative depth is far outside its expected range -- "
                         "the hand-size normalisation is probably wrong here")
 
-    # Decode real samples. This is the part that exercises the .vrs image read
-    # and the timestamp domain, which is where the Quest path differs.
+    # Decoding real samples is what exercises the .vrs read and the timestamp domain.
     step = max(1, n // max(1, args.samples))
     blank, decoded, no_hand = 0, 0, 0
     for i in range(0, n, step):

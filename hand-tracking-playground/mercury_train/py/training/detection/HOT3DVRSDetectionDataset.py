@@ -1,99 +1,11 @@
 """
-HOT3D full (VRS-based) detection loader -- reads Meta's own pre-computed,
-occlusion-aware 2D hand bounding boxes from box2d_hands.csv directly,
-instead of re-deriving boxes from 3D keypoint projection the way
-HOT3DDetectionDataset.py (built against the lightweight HOT3D-Clips /
-WebDataset format) has to.
-
-Why this exists (see prior HOT3DDetectionDataset.py visual verification):
-projecting 3D hand keypoints through the camera model only tells you where
-the hand *geometrically* is relative to the camera frustum -- it can't know
-the hand is occluded by the body, an object, or the headset frame. That was
-the irreducible remaining error after fixing camera-stream selection and
-adding a behind-camera depth guard. The full VRS-based HOT3D dataset ships
-box2d_hands.csv, which is Meta's own ground-truth 2D box per hand per
-camera stream per timestamp, INCLUDING a visibility_ratio field -- i.e.
-already occlusion-aware, no projection math needed at all here. NOTE:
-visibility_ratio is a 0.0-1.0 fraction (fully-visible hands read 1.0), NOT
-a 0-100 percent as an earlier version of this docstring assumed -- that
-mismatch made min_visibility_ratio's old default of 20.0 an unreachable
-threshold that silently dropped every box (see verify_hot3d_vrs_visual.py
-run history). Confirmed via debug_boxes.py against a real sample.
-
-Source of truth for the CSV schema / reader API (Apache 2.0, read not
-vendored -- imported directly from the cloned hot3d repo, same repo already
-cloned on the cluster to build the `hot3d` conda env for downloading):
-    hot3d/hot3d/data_loaders/HandBox2dDataProvider.py
-    hot3d/hot3d/data_loaders/PathProvider.py
-    hot3d/hot3d/data_loaders/AriaDataProvider.py
-
-Deliberately does NOT build a full Hot3dDataProvider (dataset_api.py) --
-that requires an ObjectLibrary (object models + eval sets), which would mean
-downloading the whole Hot3DAssets bundle just to read hand boxes we don't
-need object data for at all. AriaDataProvider (image reads from
-recording.vrs) + HandBox2dProvider (box2d_hands.csv) are self-contained and
-don't need it.
-
-hand_index -> left/right slot mapping is ASSUMED (0=left, 1=right, matching
-UmeTrack's HandSide convention used everywhere else in this project) but
-NOT yet confirmed against this specific CSV -- verify visually with
-verify_hot3d_vrs_visual.py the same way EgoHands' class-index assumption
-was checked (verify_egohands_classes.py) before trusting it for real
-training.
-
-SAMPLE INDEX, CACHING, AND FRAME STRIDE
----------------------------------------
-The index holds only plain data -- sequence, image stream, timestamp,
-headset -- and never a live provider object. An earlier version stored the
-open AriaDataProvider in every sample tuple, which had three consequences,
-all of which become severe once the mixed Aria+Quest split raises the
-sequence count:
-
-1. Every sequence's .vrs had to be opened before training could begin, over
-   network storage, on every run, with no way to cache the result.
-2. DataLoader workers are forked, so they inherited the parent's already-open
-   VRS handles. Two processes reading the same C++ file handle is what
-   produced garbled timestamps and JPEG decode failures in the keypoint
-   pipeline before HOT3DKeypointDataset was restructured the same way. This
-   loader had the same defect and, unlike that one, no worker_init to fix it.
-3. The index could not be serialised at all, so the cost in (1) was
-   unavoidable.
-
-The structure here mirrors HOT3DKeypointDataset's, for the same reasons:
-
-1. The per-sequence index is cached to disk (see index_cache_dir). The cache
-   key includes frame_stride and INDEX_FORMAT_VERSION, so changing either --
-   or changing the sampling logic here and bumping the version -- invalidates
-   stale caches automatically. min_visibility_ratio is deliberately NOT part
-   of the key: it filters boxes inside __getitem__ and has no effect on which
-   (frame, stream) pairs the index contains. Writes go to a temporary file and
-   are then os.replace()d into position, so a job killed mid-write cannot
-   leave a half-written index behind.
-
-2. Providers open lazily, on first access to a sample from that sequence, and
-   are then kept open. They are deliberately NOT evicted: DataLoader(
-   shuffle=True) draws consecutive samples from unrelated sequences, so any
-   LRU policy would thrash.
-
-   With num_workers>0, each worker MUST clear this cache in its
-   worker_init_fn -- see worker_init() below.
-
-3. frame_stride subsamples timestamps. HOT3D's cameras run at 30 Hz, so
-   consecutive frames are near-duplicates. Set frame_stride=1 to reproduce the
-   exhaustive sampling this loader used previously.
-
-Frames with no visible hand are kept as genuine exists=0 negatives -- the
-index iterates every image stream's own timestamps rather than only the
-box2d CSV's, the same role EgoHands fills for DetNet upstream.
-
-Usage:
-    ds = HOT3DVRSDetectionDataset(
-        sequence_dirs=["/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d/dataset/P0003_c701bd11"],
-        hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d",
-        min_visibility_ratio=0.2,
-        frame_stride=5,
-        index_cache_dir="/storage/user/praa/scratch/hot3d_detection_index",
-    )
+HOT3D detection loader for the full VRS dataset. Reads Meta's occlusion-aware 2D
+boxes from box2d_hands.csv instead of projecting 3D keypoints, which cannot know a
+hand is hidden. visibility_ratio is a 0.0-1.0 fraction, not a percentage, and
+hand_index is assumed 0=left, 1=right (confirm with verify_hot3d_vrs_visual.py).
+The index holds plain data, never a live provider, and is cached per sequence;
+with num_workers>0 each worker must clear it, see worker_init(). Hand-free frames
+are kept as genuine exists=0 negatives.
 """
 import os
 import sys
@@ -105,8 +17,7 @@ import augmentation
 from a_structs import ImageWithBoundingBoxes, bbox
 
 
-# Bump whenever the meaning of a cached index entry changes, so stale caches
-# are ignored rather than silently reused.
+# Bump when a cached index entry's meaning changes, so stale caches are ignored.
 INDEX_FORMAT_VERSION = 1
 
 
@@ -151,7 +62,7 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         sideways and need 270 degrees. Without this, fine-tuning would see
         sideways hands while evaluation (eval_detnet.py, which reproduces
         Monado's own letterbox) sees upright ones, and the fine-tuned model
-        would be scored off-distribution -- the exact mismatch the evaluation
+        would be scored off-distribution; the exact mismatch the evaluation
         convention exists to prevent.
 
         Default None resolves per sequence from
@@ -171,22 +82,12 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         feeds raw full-resolution frames to a fully-connected head and raises a
         shape error. It is called with deterministic=True instead.
         """
-        # hot3d's data_loaders package uses bare `from data_loaders.X import Y`
-        # (relative to hot3d/hot3d), so that directory has to be on sys.path
-        # before these imports work -- same pattern as this project's own
-        # `import py.training.common.X` needing mercury_train root on
-        # sys.path (see augmentation.py / trainer_detection.py __main__).
+        # hot3d's data_loaders uses bare imports, so hot3d/hot3d must be on sys.path first.
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
-        # Quest 3 HOT3D recordings have no TimeCode reference -- see
-        # py/training/common/hot3d_timecode_compat.py's docstring for the
-        # full investigation (verified 2026-08-09 against real Quest
-        # sequences) and why falling back to DEVICE_TIME here is safe
-        # rather than just quieting the crash. No effect on Aria sequences.
-        # Defensive sys.path insert: this class is usually imported from a
-        # caller that already put mercury_train root on sys.path (e.g.
-        # trainer_detection.py's __main__), but don't assume that here.
+        # Quest 3 has no TimeCode reference; see hot3d_timecode_compat.py. No-op for Aria.
+        # Defensive sys.path insert: callers usually do this already, but don't assume it.
         _mercury_train_root = os.path.abspath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
         if _mercury_train_root not in sys.path:
@@ -218,15 +119,13 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         self.frame_stride = frame_stride
         self.index_cache_dir = index_cache_dir
 
-        # seq_dir -> _SequenceProviders, lazily populated, never evicted.
-        # Cleared per worker process by worker_init() above.
+        # seq_dir -> providers, lazy and never evicted; cleared per worker by worker_init().
         self._open_sequences = {}
 
         if self.index_cache_dir:
             os.makedirs(self.index_cache_dir, exist_ok=True)
 
-        # Plain-data index only: no provider objects, so it serialises and so
-        # forked workers share nothing. See the module docstring.
+        # Plain-data index only: it serialises, and forked workers share nothing.
         seq_idx, stream_str, ts, headset = [], [], [], []
         for i, seq_dir in enumerate(self.sequence_dirs):
             for entry in self._index_for_sequence(seq_dir):
@@ -244,9 +143,7 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
               f"{len(self.sequence_dirs)} sequences (frame_stride="
               f"{self.frame_stride}, augment={self.augment})")
 
-    # ------------------------------------------------------------------
-    # Index
-    # ------------------------------------------------------------------
+    # --- Index -----------------------------------------------------------------
 
     def _cache_path(self, seq_dir):
         if not self.index_cache_dir:
@@ -316,27 +213,16 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
             print(f"WARNING: {seq_dir} has no box2d_hands.csv, skipping")
             return []
 
-        # Read from the sequence's own metadata.json; costs one small JSON
-        # read instead of opening the multi-gigabyte .vrs.
+        # From the sequence's own metadata.json: one small read instead of opening the .vrs.
         headset = hot3d_split.headset_of(seq_dir) or "Aria"
 
-        # mps_folder_path intentionally omitted -- get_image()/
-        # get_image_stream_ids() don't touch MPS data, and pulling in
-        # eye-gaze/point-cloud calibration would be dead weight for a
-        # detection-only loader.
+        # mps_folder_path omitted: nothing here touches MPS data.
         aria_provider = self._AriaDataProvider(paths.vrs_filepath,
                                                mps_folder_path=None)
 
         entries = []
         for stream_id in aria_provider.get_image_stream_ids():
-            # Skip the RGB camera (Aria RecordableTypeId 214, "camera-rgb")
-            # -- this project's camera model is 2 monochrome cameras, matching
-            # the target headset hardware. Keeps only camera-slam-left/-right
-            # (type 1201), which are mono and also give the stereo pair the
-            # 2-cam model expects. Mixing in RGB frames would crash
-            # augmentation/heatmap conversion downstream, which assumes
-            # single-channel input. (Quest recordings carry no RGB stream at
-            # all, so this is a no-op there.)
+            # Skip the RGB camera (type 214); keep camera-slam-left/-right (1201), mono only.
             if str(stream_id).startswith("214-"):
                 continue
 
@@ -347,9 +233,7 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
 
         return entries
 
-    # ------------------------------------------------------------------
-    # Providers
-    # ------------------------------------------------------------------
+    # --- Providers -------------------------------------------------------------
 
     def _providers_for(self, seq_dir):
         bundle = self._open_sequences.get(seq_dir)
@@ -380,10 +264,7 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
         bundle = self._providers_for(seq_dir)
         stream_id = bundle.stream_id_by_str.get(stream_str)
         if stream_id is None:
-            # The cached index names a stream this recording no longer
-            # exposes. Rare, and a stale cache rather than bad data, but
-            # returning a labelled-empty sample is safer than raising inside
-            # a DataLoader worker.
+            # Stale cache naming a missing stream; an empty sample beats raising in a worker.
             return self._empty_sample()
         box2d_provider = bundle.box2d_provider
 
@@ -416,8 +297,7 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
                         continue
 
                     b2d = hand_box.box2d
-                    # Rotate the box with the image, then re-derive an
-                    # axis-aligned box, before applying the margin.
+                    # Rotate the box with the image, re-derive it axis-aligned, then add the margin.
                     corners = _pp.rotate_points_upright(
                         [[b2d.left, b2d.top], [b2d.right, b2d.bottom]],
                         orientation, raw_w, raw_h)
@@ -431,16 +311,12 @@ class HOT3DVRSDetectionDataset(torch.utils.data.Dataset):
                     y1 = bottom + h * self.margin
 
                     b = bbox((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0)
-                    # ASSUMED 0=left, 1=right -- not yet visually confirmed
-                    # for this CSV, see module docstring.
+                    # ASSUMED 0=left, 1=right; not confirmed for this CSV, see docstring.
                     slot = 0 if hand_index == 0 else 1
                     bbox_list[slot] = b
 
         e = ImageWithBoundingBoxes(image=image, bboxes=bbox_list)
-        # Always call augment_image: besides randomising, it performs the
-        # warpAffine that brings the frame to the network's input size and
-        # carries the boxes with it. deterministic=True removes only the random
-        # draws. See that function's docstring.
+        # Always call augment_image: it also warps to input size and carries the boxes.
         e = augmentation.augment_image(e, deterministic=not self.augment)
         e = augmentation.imgwithboundingboxes320_to_heatmaps_2hand(e)
         return e

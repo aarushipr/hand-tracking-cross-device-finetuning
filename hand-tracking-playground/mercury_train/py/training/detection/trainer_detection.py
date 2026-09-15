@@ -25,33 +25,18 @@ modelinputW = header.model_input_width
 modelinputH = header.model_input_height
 
 # --- Fine-tuning schedule (Chapter 4, Table 4.2) ---------------------------
-# Matches KeyNet's schedule (py/training/keypoint/kpest_trainer.py) so that
-# both networks are subject to the same stopping procedure, and any
-# difference in how much each benefits from fine-tuning reflects the
-# networks and data rather than a difference in training length.
+# Same schedule as kpest_trainer.py, so the two networks stop the same way.
 
-# Hard ceiling on epochs. Training normally stops earlier, through the
-# early-stopping patience below; this only bounds the SLURM job.
+# Hard ceiling on epochs; early stopping normally fires first.
 MAX_EPOCHS = 120
 
-# Stop after this many consecutive epochs with no improvement in validation
-# loss. Deliberately generous: the validation split is a handful of HOT3D
-# sequences, so epoch-to-epoch validation loss is noisy, and a tight patience
-# would stop on that noise rather than on genuine convergence.
+# Patience is generous: val loss over a handful of sequences is noisy.
 EARLY_STOPPING_PATIENCE = 8
 
-# Which hot3d_split split this run trains on. Also names the checkpoint
-# directory below, so a run can never resume from a checkpoint produced under
-# a different split. Matches kpest_trainer.py's own TRAIN_SPLIT constant; see
-# py/training/common/hot3d_split.py for the split designs.
+# Split to train on; also names the checkpoint dir so resume can't cross splits.
 TRAIN_SPLIT = "train_mixed"
 
-# Keep every Nth frame of each HOT3D recording. The cameras run at 30 Hz, so
-# consecutive frames are near-duplicates. Matches KeyNet's HOT3D_FRAME_STRIDE
-# so the two networks are fine-tuned on the same temporal sampling of the same
-# recordings; previously this loader used every frame while KeyNet used every
-# fifth, which meant the two networks saw the data at different densities for
-# no stated reason.
+# Keep every Nth frame; at 30 Hz they are near-duplicates. Matches KeyNet's stride.
 HOT3D_FRAME_STRIDE = 5
 
 
@@ -74,8 +59,7 @@ def train_batch(device, batch, loss_fn, optimizer, model):
     center_y_pred = pred[2]
     size_pred     = pred[3]
 
-    # Center and size losses are masked by exists_gt so that samples without
-    # a hand don't pull bounding-box predictions toward zero.
+    # Masked by exists_gt so hand-free samples don't pull boxes toward zero.
     loss_exists   = loss_fn(exists_gt, exists_pred)
     loss_center_x = loss_fn(center_x_gt * exists_gt, center_x_pred * exists_gt)
     loss_center_y = loss_fn(center_y_gt * exists_gt, center_y_pred * exists_gt)
@@ -119,26 +103,18 @@ def validate_epoch(device, val_dataloader, loss_fn, model):
     return total_loss / len(val_dataloader)
 
 def set_train_mode(model):
-    # model.train() flips every submodule to train mode, including the frozen
-    # backbone. But the backbone's BatchNorm layers must stay in eval mode --
-    # their running stats were reset by load_detnet_weights to represent a
-    # neutral/identity transform, and would drift away from that if allowed
-    # to update during training.
+    # Backbone BatchNorm stays in eval mode; its running stats were reset to identity.
     model.train()
     model.module.backbone.eval()
 
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # wandb reads WANDB_MODE from the environment — set WANDB_MODE=disabled in
-    # your SLURM script to run without logging, or omit it to log normally.
-    # No entity= specified: was hardcoded to "col" (the original author's
-    # Collabora team), which fails with a permission error for any other
-    # wandb login. Omitting it uses whatever account is actually logged in.
+    # Set WANDB_MODE=disabled in the SLURM script to run without logging.
+    # No entity=: the hardcoded "col" fails for any other wandb login.
     wandb.init(project="hand_detection_training")
 
-    # On SLURM, cpu_count() returns all CPUs on the node, not just the ones
-    # allocated to this job. SLURM_CPUS_PER_TASK is the correct value to use.
+    # cpu_count() sees the whole node on SLURM; SLURM_CPUS_PER_TASK is the allocation.
     num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", multiprocessing.cpu_count()))
 
     batch_size = 64
@@ -151,10 +127,8 @@ def main():
             "local_config.hot3d_dataset_root — nothing to train on.")
     train_seq_dirs, val_seq_dirs = split_train_val(train_pool_dirs)
 
-    # loadfast is a smoke test: prove the pipeline runs end to end in minutes,
-    # not produce a model worth keeping. Mirrors kpest_trainer.py's own
-    # loadfast path. Read straight from the environment because this package's
-    # header.py, unlike the keypoint one, carries no env_settings object.
+    # loadfast is a smoke test, not a model worth keeping.
+    # Read straight from env: this package's header.py has no env_settings object.
     loadfast = bool(int(os.environ.get("AD4_LOADFAST", "0")))
     if loadfast:
         train_seq_dirs = train_seq_dirs[:2]
@@ -173,11 +147,7 @@ def main():
             frame_stride=HOT3D_FRAME_STRIDE,
             index_cache_dir=index_cache_dir,
             augment=augment)
-        # num_workers>0 is safe here ONLY because of the dataset's
-        # worker_init(): DataLoader workers are forked, so without it they
-        # would inherit the parent's already-open VRS handles and two
-        # processes would read the same C++ file handle. See that module's
-        # docstring.
+        # num_workers>0 is safe only via worker_init(); forked workers would share VRS handles.
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle,
             num_workers=num_workers, worker_init_fn=hot3d_worker_init,
@@ -188,19 +158,14 @@ def main():
 
     val_dataloader = None
     if val_seq_dirs:
-        # augment=False: an augmented validation split re-measures a different
-        # distribution every epoch, and early stopping would then react to
-        # that noise rather than to convergence.
+        # augment=False: an augmented val split re-measures a different distribution each epoch.
         val_dataloader = make_hot3d_loader(val_seq_dirs, shuffle=False,
                                            augment=False)
     else:
         print("[trainer_detection] Too few HOT3D train-pool sequences to carve out "
             "a validation split — training will proceed with no validation-loss "
             "tracking until more sequences are available.")
-    # There is deliberately no test set here. All evaluation lives in
-    # py/evaluation/eval_detnet.py --split test_mixed, so that the zero-shot
-    # Monado baseline and this fine-tuned model are scored by exactly the same
-    # code path.
+    # No test set here; all evaluation is eval_detnet.py --split test_mixed.
 
     model = DetNet.DetNet()
     load_detnet_weights(model)
@@ -219,21 +184,15 @@ def main():
     start_epoch = 0
     best_validation_loss = float('inf')
 
-    # Use an absolute path so checkpoints are always written to the same place
-    # regardless of what directory SLURM starts the job from, and scope the
-    # directory by split so the resume block below cannot pick up a checkpoint
-    # trained on different data -- see TRAIN_SPLIT.
+    # Absolute path so checkpoints land in one place whatever dir SLURM starts in.
+    # Scoped by split so resume can't pick up a checkpoint trained on different data.
     checkpoint_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "checkpoints_loadfast" if loadfast else f"checkpoints_{TRAIN_SPLIT}")
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
     if os.path.exists(checkpoint_file):
-        # weights_only=False: PyTorch 2.6 flipped this default to True, which
-        # refuses any checkpoint containing a non-tensor object -- including
-        # the numpy scalar that best_validation_loss used to be. These are
-        # checkpoints this script wrote itself, not untrusted files, so the
-        # restriction buys nothing here and breaks resume-after-preemption.
+        # weights_only=False: PyTorch 2.6's default refuses our non-tensor best_validation_loss.
         checkpoint = torch.load(checkpoint_file, map_location=device,
                                 weights_only=False)
         if 'best_validation_loss' in checkpoint:

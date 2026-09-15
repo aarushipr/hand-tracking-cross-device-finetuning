@@ -1,77 +1,10 @@
 """
-kpest_trainer_finetune_arms.py -- KeyNet fine-tuning with a selectable starting
-point and a selectable training set. The KeyNet counterpart of
-py/training/detection/trainer_detection_finetune_arms.py; the two are meant to
-read identically and that file's docstring carries the shared reasoning.
-
-Additive only. kpest_trainer.py (phase 1, HOT3D) and kpest_trainer_phanesim.py
-(the naive phase 2) are both reported results and are not touched by this file;
-it never writes to their checkpoint directories.
-
-AD4_INIT   default (default value) -- Monado Mercury's shipped ONNX weights,
-                                      exactly as kpest_trainer.py starts.
-           phase1                  -- continue from checkpoints_train_mixed/
-                                      checkpoint_best.pth.
-AD4_ARM    mixed | phanesim | hot3d -- the training set.
-AD4_SELECT hot3d | phanesim         -- which validation loss drives early
-                                      stopping and checkpoint_best. Defaults to
-                                      phanesim when AD4_INIT=default, hot3d
-                                      otherwise.
-
-Both validation losses are measured and logged every epoch regardless of which
-one selects, and both checkpoint_best.pth (by AD4_SELECT) and
-checkpoint_best_hot3d.pth are written, so either selection can be reported
-without a second run.
-
-------------------------------------------------------------------------------
-OPTIMISER -- and why AD4_INIT decides it
-------------------------------------------------------------------------------
-With AD4_INIT=default this run is a PEER of phase 1: same starting weights, same
-frozen image_network, different training set. It must therefore use phase 1's
-optimiser settings unchanged, or the comparison measures the optimiser as well
-as the data. kpest_trainer.py calls a bare torch.optim.AdamW(trainable_params),
-so this case does too -- including PyTorch's default weight_decay=0.01, which is
-kept deliberately BECAUSE phase 1 had it, not because it is a good idea in
-isolation. MAX_EPOCHS / EARLY_STOPPING_PATIENCE come from kpest_trainer.py
-(120 / 8) for the same reason.
-
-With AD4_INIT=phase1 the run continues from an already-converged model, and the
-bare AdamW() defaults are two separate mechanisms that pull it away from what it
-had learned:
-  - lr=1e-3: AdamW normalises by gradient magnitude, so early steps move every
-    trainable parameter by roughly the learning rate regardless of the
-    gradient's actual size. Phase 1 used the same value while moving TOWARD the
-    evaluation domain, where a large step helps; continuing from convergence the
-    identical step size moves away from it.
-  - weight_decay=0.01: decays the phase-1 weights toward zero on every step,
-    independently of anything the training data's gradient says -- a forgetting
-    channel with no connection to the domain shift at all.
-This case therefore defaults to lr=1e-4, weight_decay=0.0, and a time-boxed
-30 / 5. AD4_LR, AD4_WEIGHT_DECAY, AD4_MAX_EPOCHS and AD4_PATIENCE override
-whichever case is active.
-
-------------------------------------------------------------------------------
-NOTES
-------------------------------------------------------------------------------
-Preprocessing is unchanged and is not a function of AD4_INIT: the input
-convention belongs to the weights, not to the data, and is defined once in
-py/evaluation/preprocess_baseline.py. Both dataset loaders already reproduce it
-through the same calls (_pp.keynet_crop_matrix + augmaker.do_one_augmentation,
-including the sRGB EOTF).
-
-HOT3D frame stride stays at kpest_trainer.HOT3D_FRAME_STRIDE (5) for training
-and validation alike. Raising it for the training stream was considered as a way
-to halve the dominant cost and rejected: HOT3DKeypointDataset's index cache key
-includes frame_stride (see its _cache_path), the cluster's cache holds only
-stride-5 entries, and any other stride triggers a full 294-sequence .vrs index
-rebuild costing more than the epoch time it saves.
-
-Measured epoch cost on this cluster (2026-09-09, from checkpoint timestamps):
-KeyNet HOT3D epochs ~50-60 min, Phanesim epochs ~3 min. Arms that touch HOT3D
-are therefore roughly an hour per epoch; the phanesim arm is minutes.
-
-Checkpoints go to checkpoints_monado_<arm>/ (AD4_INIT=default) or
-checkpoints_phase2_<arm>/ (AD4_INIT=phase1).
+KeyNet fine-tuning with a selectable starting point and training set, the
+counterpart of trainer_detection_finetune_arms.py, which carries the shared
+reasoning. Additive only. AD4_INIT also decides the optimiser: from Monado's
+weights it keeps phase 1's bare AdamW including weight_decay=0.01, while from
+phase1 both that decay and lr=1e-3 pull a converged model away from what it
+learned, so it defaults to lr=1e-4, weight_decay=0.0 and a time-boxed 30/5.
 """
 
 import multiprocessing
@@ -102,9 +35,7 @@ from PhanesimKeypointDataset import PhanesimKeypointDataset, discover_clip_dirs
 
 mse = nn.MSELoss(reduction='mean')
 
-# Same clip-level Phanesim val stride as kpest_trainer_phanesim.py, so the
-# Phanesim val curve here is measured on the same held-out clips the naive arm
-# used and the two are directly comparable.
+# Same Phanesim val clips as kpest_trainer_phanesim.py, so the curves compare.
 VAL_CLIP_STRIDE = 20
 
 ARMS = ("mixed", "phanesim", "hot3d")
@@ -161,12 +92,7 @@ def main():
     else:
         wandb.init(project="keypoint_estimator_training", mode="disabled")
 
-    # Capped at 4 because HOT3D samples are in play in every configuration (its
-    # val loss is measured even when it is not trained on): HOT3DKeypointDataset
-    # holds live VRS providers and DataLoader workers are forked. This is
-    # kpest_trainer.py's own cap and its reason applies here.
-    # kpest_trainer_phanesim.py could safely leave it uncapped only because
-    # every loader it built was Phanesim-only.
+    # Capped at 4: HOT3D is in every arm, and forked workers can't share its VRS providers.
     num_workers = min(4, int(os.environ.get("SLURM_CPUS_PER_TASK",
                                             multiprocessing.cpu_count())))
 
@@ -190,13 +116,8 @@ def main():
               f"{len(phanesim_val_clips)} val clips")
 
     # ---------------- HOT3D ----------------
-    # Loaded in every configuration: even when HOT3D is not trained on and not
-    # selected on, its val loss is measured each epoch so the run records the
-    # real-domain trajectory the thesis reports.
-    #
-    # list_sequence_dirs(..., "train_mixed") lists only the train participants,
-    # so hot3d_split.TEST_MIXED_PARTICIPANTS -- the sequences eval_keynet.py
-    # scores against -- can never reach this training set or this val set.
+    # Loaded always: its val loss is measured each epoch for the real-domain trajectory.
+    # "train_mixed" lists only train participants, so test sequences can never leak in.
     train_pool = hot3d_split.list_sequence_dirs(
         local_config.hot3d_dataset_root, TRAIN_SPLIT)
     if not train_pool:
@@ -229,9 +150,7 @@ def main():
 
     hot3d_val = make_hot3d_dataset(hot3d_val_dirs)
 
-    # eval_mode=False throughout, matching kpest_trainer.py's own
-    # make_hot3d_loader and kpest_trainer_phanesim.py -- eval_mode is only for
-    # eval_keynet.py's standalone deterministic evaluation.
+    # eval_mode=False throughout; eval_mode is only for eval_keynet.py's standalone run.
     phanesim_train = phanesim_val = None
     if uses_phanesim:
         phanesim_train = PhanesimKeypointDataset(
@@ -254,17 +173,8 @@ def main():
         print(f"[finetune] Phanesim-only training set: "
               f"{len(train_dataset)} samples/epoch")
 
-    # worker_init_fn is required whenever HOT3D samples are in a loader (forked
-    # workers would otherwise share the parent's open VRS handles). It only
-    # clears provider caches, so it is harmless for Phanesim samples and every
-    # loader carries it unconditionally.
-    #
-    # drop_last=False everywhere, NOT kpest_trainer.py's drop_last=True for its
-    # train loader: under loadfast the whole train set can be smaller than one
-    # batch, which would leave train_loop with zero iterations and
-    # `total_loss / loss_divisor` a division by zero. Same trap
-    # kpest_trainer_phanesim.py already avoids the same way (job 1700699).
-    # Harmless for a real run -- at most one short batch per epoch.
+    # worker_init_fn on every loader: forked workers would otherwise share open VRS handles.
+    # drop_last=False: under loadfast the train set can be under one batch (job 1700699).
     def make_loader(dataset, shuffle):
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle,
@@ -278,18 +188,10 @@ def main():
 
     # ---------------- Model ----------------
     model = KeyNet.KeyNet()
-    # load_keynet_weights() is what loads Monado's shipped ONNX weights, and it
-    # runs in BOTH cases. With init=phase1 its weight VALUES are overwritten
-    # below, but the call is still required first: load_weights.py's
-    # load_conv_bn() dynamically attaches .bias Parameters to image_network/
-    # fused_network/network_2d_px_coord conv layers that InvertedResidual builds
-    # with bias=False, so a bare KeyNet.KeyNet() has fewer parameters than any
-    # checkpoint saved after this call and a strict load_state_dict would fail
-    # on every one of them.
+    # load_keynet_weights() first even with init=phase1: it attaches the .bias params.
     load_keynet_weights(model)
 
-    # Frozen BEFORE DataParallel wrapping, matching kpest_trainer.py's ordering.
-    # Frozen in every configuration, matching phase 1 and the naive phase 2.
+    # Frozen before DataParallel wrapping, in every configuration, as in phase 1.
     for param in model.image_network.parameters():
         param.requires_grad = False
 
@@ -316,8 +218,7 @@ def main():
         optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=wd)
         print(f"[finetune] AdamW(lr={lr}, weight_decay={wd}) -- explicit override")
     elif init == "default":
-        # Bare AdamW(), byte-for-byte what kpest_trainer.py does, weight decay
-        # included. Matching phase 1 exactly is the point of this configuration.
+        # Bare AdamW(), byte-for-byte what kpest_trainer.py does; that is the point here.
         optimizer = torch.optim.AdamW(trainable_params)
         print("[finetune] AdamW() with PyTorch defaults (lr=1e-3, "
               "weight_decay=0.01) -- matches kpest_trainer.py, so this run "
@@ -363,9 +264,7 @@ def main():
             device, dataloader_train, model, optimizer)
 
         model.eval()
-        # Both losses every epoch regardless of which selects. Distinct
-        # output_folder names so validatoor's own wandb keys and dumped images
-        # don't collide.
+        # Both losses every epoch; distinct output_folder names so wandb keys don't collide.
         hot3d_result = validatoor.validation_loop(
             device, dataloader_val_hot3d, model, mse, "val_hot3d", False, epoch)
         hot3d_loss = hot3d_result.mean_loss_no_pred
@@ -423,17 +322,14 @@ def main():
             state['val_loss_phanesim'] = phanesim_loss
         save_checkpoint(state, checkpoint_dir)
 
-        # Unconditional at epoch 0 so the epoch-0 point exists for the
-        # trajectory table even if the run is cut short.
+        # Unconditional at epoch 0 so the trajectory table has that point if the run is cut.
         if epoch == 0 or epoch % 10 == 0:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, f"checkpoint_{epoch}.pth"))
         if is_best:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, "checkpoint_best.pth"))
-        # Written separately so the HOT3D-optimal checkpoint is available even
-        # when selection is deliberately blind to HOT3D. Identical to
-        # checkpoint_best.pth whenever select == "hot3d".
+        # Separate file so the HOT3D-optimal checkpoint exists even when selection ignores HOT3D.
         if is_best_hot3d:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, "checkpoint_best_hot3d.pth"))

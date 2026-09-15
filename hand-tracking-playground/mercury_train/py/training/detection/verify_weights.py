@@ -1,19 +1,9 @@
 """
 Numerical cross-check of load_detnet_weights() against Monado's shipped
-grayscale_detection_160x160.onnx.
-
-Loads the ONNX weights into a fresh DetNet via load_detnet_weights(), then
-runs one shared random input through both the ONNX graph (via onnxruntime)
-and the loaded PyTorch module, and reports the max absolute difference per
-output. Values at ~1e-6 or smaller are ordinary float32 rounding, not a
-real discrepancy -- this is what licenses treating the loaded PyTorch
-model as the same network Monado ships, not merely one built to resemble
-it (see load_weights.py / DetNet.py for why this isn't a plain
-state-dict-by-name load: the ONNX export fused each Conv+BatchNorm pair,
-discarding the original BatchNorm statistics).
-
-Usage:
-    python verify_weights.py
+grayscale_detection_160x160.onnx: one random input through both, reporting the max
+absolute difference per output. Around 1e-6 is float32 rounding. Needed because
+the ONNX export fused every Conv+BatchNorm pair, so this is not a
+state-dict-by-name load. Results are recorded in CONVERSION_VERIFICATION.md.
 """
 import numpy as np
 import torch

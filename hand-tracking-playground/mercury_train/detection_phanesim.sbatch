@@ -10,7 +10,7 @@
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# XR Hand Detection (DetNet) Training Job — PHASE 2: Phanesim fine-tuning
+# XR Hand Detection (DetNet) Training Job. PHASE 2: Phanesim fine-tuning
 # on top of the phase-1 HOT3D checkpoint. See trainer_detection_phanesim.py's
 # docstring for why this is a separate script/checkpoint dir from phase 1.
 # ---------------------------------------------------------------------------
@@ -37,10 +37,10 @@ SCRIPT_DIR="$REPO_ROOT/py/training/detection"
 # Pre-flight checks (already confirmed 2026-09-09, before this job existed):
 # 1. local_config.py has phanesim_dataset_roots pointing at both dataset
 #    roots under /storage/user/praa/phanesim_dataset/.
-# 2. checkpoints_train_mixed/checkpoint_best.pth (phase 1) exists — this
+# 2. checkpoints_train_mixed/checkpoint_best.pth (phase 1) exists; this
 #    job loads it as its starting weights; it does NOT retrain from scratch
 #    or touch that file.
-# 3. checkpoints_phanesim_phase2/ does not exist yet — nothing for this run
+# 3. checkpoints_phanesim_phase2/ does not exist yet; nothing for this run
 #    to collide with.
 # 4. AD4_LOADFAST=1 smoke test (checkpoints_loadfast/) completed successfully
 #    before this real job was ever submitted.

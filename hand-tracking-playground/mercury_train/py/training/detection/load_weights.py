@@ -48,7 +48,7 @@ def load_detnet_weights(model, onnx_path=ONNX_PATH):
     
     _load_conv_bn(stem_conv, stem_bn, *next(pair_iter))
     
-    for block in backbone_children[3:]:  # skip stem conv/bn/relu — indices 0,1,2
+    for block in backbone_children[3:]:  # skip stem conv/bn/relu, indices 0,1,2
         irb_layers = list(block.conv.children())
         conv_bn_layers = [m for m in irb_layers if isinstance(m, (torch.nn.Conv2d, torch.nn.BatchNorm2d))]
 

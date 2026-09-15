@@ -142,9 +142,9 @@ def normalize_grayscale_exact(img, target_mean=0.5, target_std=0.25):
     two steps. Matches Monado's production runtime bit for bit, including
     the fact that it applies no output clipping and bails out entirely,
     returning None, on an image with exactly zero standard deviation.
-    Shared by training (normalizeGrayscaleImage below) and by
-    hot3d_baseline_detection_eval.py, so the two can no longer silently
-    drift apart the way two separately written copies previously did."""
+    Shared by training (normalizeGrayscaleImage below) and by evaluation,
+    so the two can no longer silently drift apart the way two separately
+    written copies previously did."""
     img = img.astype(np.float32)
     std = float(np.std(img))
     if std == 0:
@@ -161,11 +161,7 @@ def normalizeGrayscaleImage(
         target_std=0.25):
     if img.dtype == np.uint8:
         img = mat_uint8tofloat32(img)
-    # A near-zero (but not exactly zero) standard deviation is replaced with
-    # random noise before calling the exact port above, since training must
-    # always produce a usable image for every sample in a batch, unlike a
-    # one-off evaluation run, which can afford to skip a single degenerate
-    # frame instead of substituting something for it.
+    # Near-zero (not exactly zero) stddev gets random noise: training needs every sample.
     std = np.std(img)
     if std < 0.0001:
         if report is not None:
@@ -174,9 +170,7 @@ def normalizeGrayscaleImage(
 
     result = normalize_grayscale_exact(img, target_mean=target_mean, target_std=target_std)
     if result is None:
-        # Vanishingly unlikely after the substitution above, since real
-        # random noise essentially never has exactly zero variance, but
-        # guarded rather than allowed to propagate None into a batch.
+        # Vanishingly unlikely after the substitution, but guarded rather than returning None.
         result = normalize_grayscale_exact(
             np.random.random(img.shape).astype(np.float32),
             target_mean=target_mean, target_std=target_std)

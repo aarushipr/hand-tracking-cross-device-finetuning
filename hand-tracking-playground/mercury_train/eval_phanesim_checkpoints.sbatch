@@ -15,7 +15,7 @@
 # checkpoint_10.pth, ..., checkpoint_best.pth) against the real HOT3D
 # test_mixed split, using the SAME eval_detnet.py / eval_keynet.py scripts
 # unchanged. Purpose: phase-2's "best" checkpoint was chosen by validation
-# loss measured on phanesim's OWN val clips, never against HOT3D -- this
+# loss measured on phanesim's OWN val clips, never against HOT3D; this
 # sweep shows whether HOT3D performance degrades gradually over phase-2
 # training (in which case an earlier stopping point loses less) or is
 # already gone by the first saved checkpoint (in which case the phanesim-

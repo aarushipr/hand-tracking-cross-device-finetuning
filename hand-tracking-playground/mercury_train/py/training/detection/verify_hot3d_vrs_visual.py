@@ -1,18 +1,8 @@
 """
-Visual sanity check for HOT3DVRSDetectionDataset: does the drawn box land on
-an actual visible hand, not empty space? Supersedes the earlier
-verify_hot3d_visual.py, which targeted a dataset class no longer in use.
-This one additionally needs to confirm the
-hand_index -> left/right slot assumption (0=left, 1=right) that
-HOT3DVRSDetectionDataset.py flags as unverified, since box2d_hands.csv
-doesn't self-document that.
-
-Usage:
-    python verify_hot3d_vrs_visual.py \
-        --sequence-dirs /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d/dataset/P0003_c701bd11 \
-        --hot3d-repo-root /storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d \
-        --out-dir /storage/user/praa/hot3d_full_setup/viz_vrs \
-        --num-samples 12
+Visual sanity check for HOT3DVRSDetectionDataset: does the drawn box land on a
+visible hand, and is slot 0 consistently the left hand? box2d_hands.csv does not
+document its hand_index convention, so the loader's 0=left assumption has to be
+confirmed by looking. See --help for arguments.
 """
 import argparse
 import os

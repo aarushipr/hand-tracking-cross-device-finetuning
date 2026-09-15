@@ -4,11 +4,7 @@ import os
 from typing import Any  # nopep8
 sys.path.insert(0, os.path.dirname(__file__))  # nopep8
 import site  # nopep8
-# Blender's bundled Python doesn't pick up `pip install --user` packages
-# (pandas, numpy -- see requirements.txt) on its own. This used to be a
-# path hardcoded to the original author's machine
-# ('/home/moses/.local/lib/python3.10/site-packages'); computing it lets
-# it work regardless of username/Python version/OS.
+# Blender's bundled Python misses --user packages; computed, not hardcoded to one machine.
 sys.path.append(site.getusersitepackages())  # nopep8
 
 from dataclasses import dataclass  # nopep8

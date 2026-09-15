@@ -106,12 +106,7 @@ def load_image(path):
 
 
 def remove_orphans_of_datatype(dt):
-    # NOTE: don't call dt.remove() while iterating over dt directly --
-    # bpy.data.* collections can shift under the iterator when an item is
-    # removed, silently skipping the next entry. Over many sequences this
-    # let orphaned HDRI images (large decoded EXR buffers) pile up instead
-    # of being freed, eventually OOM-killing the process. Snapshot the
-    # candidates first, then remove from that stable list.
+    # Don't remove() while iterating bpy.data.*: it skips entries and leaked HDRIs until OOM.
     orphans = [obj for obj in dt if obj.users == 0]
     for obj in orphans:
         print(
@@ -179,10 +174,7 @@ def make_exr_background(st):
     mappingnode.inputs["Scale"].default_value[1] = np.random.normal(1.0, 0.1)
     mappingnode.inputs["Scale"].default_value[2] = np.random.normal(1.0, 0.1)
 
-    # Configurable so this isn't tied to one machine's layout; falls back to
-    # the repo's standard sibling location: <thesis root>/hdris/, i.e.
-    # five levels up from this file (data_generator -> py -> mercury_train ->
-    # hand-tracking-playground -> working-code -> thesis root).
+    # Configurable, falling back to <thesis root>/hdris/, five levels up from here.
     default_hdris_dir = os.path.normpath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "..", "..", "..", "..", "..", "hdris"))
@@ -199,49 +191,18 @@ def make_exr_background(st):
 
 
 def add_ambient_occlusion(st):
-    # EEVEE Next (Blender 4.2+) replaced GTAO with a broader "fast GI"
-    # approximation. Confirmed live against Blender 5.1/5.2 via bl_rna
-    # property descriptions, not just name-matching:
-    #   use_fast_gi     <- use_gtao            (master toggle)
-    #   fast_gi_distance <- gtao_distance       ("max distance other
-    #                        surfaces contribute", same role as before)
-    #   fast_gi_quality  <- gtao_quality        ("precision of fast GI ray
-    #                        marching"; its default of 0.25 matches what
-    #                        this code was already setting)
-    # gtao_factor / use_gtao_bent_normals / use_gtao_bounce have no
-    # equivalent in the new system -- dropped rather than guessed at.
+    # EEVEE Next replaced GTAO: use_fast_gi/fast_gi_distance/fast_gi_quality <- use_gtao/*.
+    # gtao_factor, use_gtao_bent_normals and use_gtao_bounce have no equivalent; dropped.
     st.blender_scene.eevee.use_fast_gi = True
     st.blender_scene.eevee.fast_gi_distance = 0.23
     st.blender_scene.eevee.fast_gi_quality = 0.25
 
 
 def make_render_output(st: header.State, make_alpha_output):
-    # No compositor node graph needed here -- render_and_save_frame() does
-    # everything via a direct scene render + Python-side pixel processing.
-    # Two prior approaches were tried and both broke silently:
-    #   1. CompositorNodeOutputFile (Render Layers -> File Output): gets
-    #      dynamically restricted to OPEN_EXR_MULTILAYER on this Blender
-    #      build regardless of item type (RGBA or FLOAT) -- confirmed
-    #      live. Files written that way can't be read back afterward at
-    #      all: bpy.data.images.load() and bpy.ops.image.open() both
-    #      report size (0, 0) / 0 channels on the resulting .exr despite a
-    #      real, correctly-sized file existing on disk. Confirmed on two
-    #      independent Blender installs, so not an environment quirk.
-    #   2. CompositorNodeViewer (reads bpy.data.images['Viewer Node']
-    #      directly, no file I/O): worked when tested through Blender's
-    #      interactive UI, but came back solid black under real headless
-    #      (-b) execution -- the Viewer Node is fundamentally a UI/preview
-    #      feature and apparently doesn't populate without one.
-    # A direct scene render to a plain (non-multilayer) PNG sidesteps both
-    # failure modes: it's the same rendering mechanism this pipeline has
-    # already been relying on headlessly the whole time, and reading back
-    # a plain single-layer image format (as opposed to multilayer EXR) has
-    # been confirmed to work correctly.
-    #
-    # Explicitly disabling the compositor guards against whatever
-    # pre-existing node setup might already be baked into the artist's
-    # .blend file (see the "Learned this lesson on august 21" history this
-    # function used to have) from interfering with the plain render.
+    # No compositor graph: render_and_save_frame() renders directly and processes pixels here.
+    # CompositorNodeOutputFile is forced to multilayer EXR that reads back as 0 channels.
+    # CompositorNodeViewer works in the UI but is black under headless -b; plain PNG avoids both.
+    # The compositor is disabled explicitly so the artist's own .blend nodes can't interfere.
     st.blender_scene.use_nodes = False
 
     if make_alpha_output:
@@ -253,13 +214,13 @@ def make_render_output(st: header.State, make_alpha_output):
 def render_and_save_frame(st: header.State, frame_idx: int, save_alpha: bool):
     """Renders the scene's *current* frame (caller sets frame_current
     beforehand) to a temporary plain RGBA PNG, reads that back, and saves
-    the processed 8-bit monochrome PNG(s) derived from it -- see
+    the processed 8-bit monochrome PNG(s) derived from it; see
     make_render_output()'s comment for the two approaches that silently
     broke before this one and why. Deletes the temporary raw PNG and its
     in-memory datablock once read.
 
     Called once per frame instead of a single
-    bpy.ops.render.render(animation=True) covering the whole sequence --
+    bpy.ops.render.render(animation=True) covering the whole sequence,
     safe because every bone/empty/camera transform is keyframed per-frame
     before this runs, so rendering frame_current one at a time is
     equivalent to rendering the animation in one call.
@@ -269,7 +230,7 @@ def render_and_save_frame(st: header.State, frame_idx: int, save_alpha: bool):
     mono sensors that convert_folder_exr_to_png() used to add.
 
     imgs_alpha stores 1 - render_alpha, matching the old compositor
-    Math-node MULTIPLY(-1) + ADD(1) pair this replaces -- computed here in
+    Math-node MULTIPLY(-1) + ADD(1) pair this replaces, computed here in
     numpy instead since the full buffer is already in Python, no need to
     round-trip it through compositor nodes at all.
     """
@@ -284,10 +245,7 @@ def render_and_save_frame(st: header.State, frame_idx: int, save_alpha: bool):
     scene.render.filepath = raw_path
     bpy.ops.render.render(write_still=True)
 
-    # check_existing=False: don't let Blender hand back a stale cached
-    # datablock from an earlier frame/sequence that happened to reuse this
-    # same temp filename -- always force a fresh read of what's on disk
-    # right now.
+    # check_existing=False: force a fresh read, not a stale datablock from a reused temp name.
     raw_img = bpy.data.images.load(raw_path, check_existing=False)
     w, h = raw_img.size
     pixels = np.array(raw_img.pixels[:], dtype=np.float32).reshape(h, w, 4)

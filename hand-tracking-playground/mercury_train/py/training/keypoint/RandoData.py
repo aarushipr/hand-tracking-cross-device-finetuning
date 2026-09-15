@@ -196,10 +196,7 @@ class RandoDataset(torch.utils.data.Dataset):
 
         acc_idx = 0
 
-        # .iloc[] instead of bare [] — pandas is deprecating positional
-        # integer indexing via Series.__getitem__ (was spamming a
-        # FutureWarning on every single sample, drowning out real log
-        # output during training).
+        # .iloc[]: pandas is deprecating positional indexing and warned on every sample.
         filename = b.iloc[acc_idx]
         acc_idx += 1
 

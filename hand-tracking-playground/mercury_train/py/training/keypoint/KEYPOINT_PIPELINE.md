@@ -2,7 +2,7 @@
 
 ## What is Keypoint Estimation?
 
-Keypoint estimation is the task of taking an image of a hand and predicting the 2D and 3D positions of 21 anatomical landmarks (joints) — the wrist, knuckles, and fingertips. This is the core problem in hand tracking: once you know where the joints are, you can reconstruct the full hand pose.
+Keypoint estimation is the task of taking an image of a hand and predicting the 2D and 3D positions of 21 anatomical landmarks (joints); the wrist, knuckles, and fingertips. This is the core problem in hand tracking: once you know where the joints are, you can reconstruct the full hand pose.
 
 The pipeline here is inspired by the MegaTrack and UmeTrack papers. It takes a grayscale crop of a hand (128×128 pixels) and outputs heatmaps indicating where each joint is, along with depth estimates and several auxiliary predictions.
 
@@ -12,13 +12,13 @@ The pipeline here is inspired by the MegaTrack and UmeTrack papers. It takes a g
 
 | File | Role |
 |---|---|
-| `kpest_trainer.py` | Entry point — orchestrates training and validation |
+| `kpest_trainer.py` | Entry point, orchestrates training and validation |
 | `validatoor.py` | Validation loop logic |
 | `KeyNet.py` | The neural network model |
 | `HOT3DKeypointDataset.py` | Loads HOT3D hand crops and keypoint ground truth |
 | `../common/hot3d_split.py` | Defines the train/test partition |
-| `CombinedDataset.py` | Legacy multi-source mixer — not used by this fine-tuning |
-| `ArtificialData.py` | Legacy synthetic loader — not used by this fine-tuning |
+| `CombinedDataset.py` | Legacy multi-source mixer, not used by this fine-tuning |
+| `ArtificialData.py` | Legacy synthetic loader, not used by this fine-tuning |
 | `RandoData.py` | Legacy real-dataset loader; its crop helpers are still reused |
 | `settings.py` | Loss weight hyperparameters |
 | `kpest_header.py` | Environment configuration (wandb, GUI, fast mode) |
@@ -37,7 +37,7 @@ Fine-tuning trains on HOT3D only. The split is defined in
 | Split | Source | Purpose |
 |---|---|---|
 | **Train** | `train_mixed` minus a 10% validation carve-out | What the model learns from |
-| **Val** | 10% of `train_mixed`, carved at sequence level | Checked every epoch — convergence and checkpoint selection |
+| **Val** | 10% of `train_mixed`, carved at sequence level | Checked every epoch: convergence and checkpoint selection |
 | **Test** | `test_mixed` | Held-out participants, scored only by `py/evaluation/eval_keynet.py` |
 
 `train_mixed` and `test_mixed` pool Aria and Quest recordings and partition
@@ -45,7 +45,7 @@ Fine-tuning trains on HOT3D only. The split is defined in
 partition is chosen so each device individually sits near 80/20, not just the
 combined total, and it is frozen as a constant in `hot3d_split.py` rather than
 recomputed from disk. Validation is carved out at sequence level within the
-training pool, so a participant may appear in both train and val — that is
+training pool, so a participant may appear in both train and val; that is
 intentional, since val only monitors convergence. Generalisation is measured on
 `test_mixed` alone.
 
@@ -112,9 +112,9 @@ fine-tuning trains on them**.
 KeyNet is a lightweight MobileNetV2-style convolutional neural network. It takes three inputs and produces four outputs.
 
 ### Inputs
-1. **`input_image`** — a 128×128 grayscale image of the hand crop `[B, 1, 128, 128]`
-2. **`input_predicted_keypoints`** — a flattened vector of 42 numbers (21 joints × 2D coordinates) from the previous frame's prediction `[B, 42]`
-3. **`input_predicted_keypoints_valid`** — a scalar flag per sample indicating whether the prior prediction should be trusted `[B]`
+1. **`input_image`**: a 128×128 grayscale image of the hand crop `[B, 1, 128, 128]`
+2. **`input_predicted_keypoints`**: a flattened vector of 42 numbers (21 joints × 2D coordinates) from the previous frame's prediction `[B, 42]`
+3. **`input_predicted_keypoints_valid`**: a scalar flag per sample indicating whether the prior prediction should be trusted `[B]`
 
 The prior pose input is the temporal feedback loop from MegaTrack/UmeTrack: in real-time tracking, knowing where the joints were a moment ago helps find them now. During training this can be zeroed out (controlled by `settings.using_pose_predicted_input`) to train the model to work from image alone.
 
@@ -143,8 +143,8 @@ concatenate → [B, 96, 16, 16]
 ### Outputs
 | Output | Shape | What it represents |
 |---|---|---|
-| `out_xy` | `[B, 21, 22, 22]` | 2D spatial heatmap per joint — where the joint is in the image |
-| `out_depth` | `[B, 21, 22]` | 1D heatmap per joint — how far the joint is from the camera |
+| `out_xy` | `[B, 21, 22, 22]` | 2D spatial heatmap per joint, where the joint is in the image |
+| `out_depth` | `[B, 21, 22]` | 1D heatmap per joint, how far the joint is from the camera |
 | `out_extras[:, 0]` | `[B]` | Hand existence confidence (passed through sigmoid → probability) |
 | `out_extras[:, 1:4]` | `[B, 3]` | Elbow direction as a 3D unit vector |
 | `out_curls[:, 0:5]` | `[B, 5]` | Curl angle per finger |
@@ -169,11 +169,11 @@ loss_xy = mse(pred_xy * has_xy_mask, gt_xy * has_xy_mask)
 
 | Loss | Formula | Weight | Purpose |
 |---|---|---|---|
-| `loss_xy` | MSE on 2D heatmaps | 1.0 (unscaled) | Primary task — joint locations in the image |
+| `loss_xy` | MSE on 2D heatmaps | 1.0 (unscaled) | Primary task, joint locations in the image |
 | `loss_depth` | MSE on 1D depth heatmaps | `depth_loss_mul = 0.03` | Joint depth from camera |
-| `loss_existence` | MSE on is_hand probability | `existence_loss_mul = 0.0` | Disabled — KeyNet only ever sees regions DetNet already accepted |
-| `loss_elbow` | MSE on elbow direction vector | `elbow_loss_mul = 0.0` | Disabled — HOT3D has no body pose to derive elbows from |
-| `loss_curls` | Gaussian NLL on curl angles | `curls_loss_mul = 0.0` | Disabled — same reason as elbow |
+| `loss_existence` | MSE on is_hand probability | `existence_loss_mul = 0.0` | Disabled, KeyNet only ever sees regions DetNet already accepted |
+| `loss_elbow` | MSE on elbow direction vector | `elbow_loss_mul = 0.0` | Disabled, HOT3D has no body pose to derive elbows from |
+| `loss_curls` | Gaussian NLL on curl angles | `curls_loss_mul = 0.0` | Disabled, same reason as elbow |
 
 For this fine-tuning only the 2D heatmap and depth terms are active. The
 existence, elbow and curl multipliers are set to zero in `settings.py`: HOT3D
@@ -216,7 +216,7 @@ At the end of the loop, return the average loss across all batches.
 validation sequences carved out of `train_mixed`.
 
 `validation_loop_just_one` does the actual work:
-- Runs inside `torch.no_grad()` — no gradient tracking, saves memory and time
+- Runs inside `torch.no_grad()`: no gradient tracking, saves memory and time
 - Applies the same availability masks as training so the numbers are comparable
 - Computes loss per batch, stores in arrays, returns the mean
 
@@ -228,10 +228,10 @@ HOT3D validation runs once, with the predicted-keypoint input withheld
 ## Checkpointing
 
 After every training epoch, the trainer saves a checkpoint containing:
-- `epoch` — which epoch just finished
-- `state_dict` — all model weights
-- `optimizer` — AdamW momentum statistics
-- `best_validation_loss` — the lowest validation loss seen so far
+- `epoch`: which epoch just finished
+- `state_dict`: all model weights
+- `optimizer`: AdamW momentum statistics
+- `best_validation_loss`: the lowest validation loss seen so far
 
 Checkpoints are written to `checkpoints_<split>/` (so `checkpoints_train_mixed/`
 for the current design). Scoping the directory by split is what stops a new run
@@ -239,9 +239,9 @@ resuming from a checkpoint trained on different data. Smoke-test runs
 (`AD4_LOADFAST=1`) get `checkpoints_loadfast/` instead.
 
 Three checkpoint files are maintained:
-- `checkpoint.pth` — always the latest epoch, overwritten each time
-- `checkpoint_{N}.pth` — a permanent copy saved every 10 epochs
-- `checkpoint_best.pth` — a permanent copy of the epoch with the lowest validation loss
+- `checkpoint.pth`: always the latest epoch, overwritten each time
+- `checkpoint_{N}.pth`: a permanent copy saved every 10 epochs
+- `checkpoint_best.pth`: a permanent copy of the epoch with the lowest validation loss
 
 When training is resumed, the checkpoint is loaded and training picks up from `start_epoch` with the optimizer in exactly the same state as when it stopped.
 
@@ -290,7 +290,7 @@ The trainer automatically reads `SLURM_CPUS_PER_TASK` to set the number of DataL
 `visualizer.py` serves two purposes that work very differently on a cluster:
 
 **1. OpenCV display window (`cv2.imshow`)**
-This requires a physical display or X11 forwarding — neither of which exists on a headless SLURM node. If `AD4_ENABLEGUI=1` on SLURM, the code will crash with an error like `cannot connect to X server`. Set `AD4_ENABLEGUI=0` and this path is skipped entirely via `if header.env_settings.gui_enabled:`.
+This requires a physical display or X11 forwarding, neither of which exists on a headless SLURM node. If `AD4_ENABLEGUI=1` on SLURM, the code will crash with an error like `cannot connect to X server`. Set `AD4_ENABLEGUI=0` and this path is skipped entirely via `if header.env_settings.gui_enabled:`.
 
 **2. wandb image logging (`wandb.log({name: wandb.Image(...)})`)**
 This works fine on SLURM. The visualizer builds a canvas in memory using OpenCV drawing functions (no display needed), converts it to a uint8 image, and sends it to wandb over the network. As long as `AD4_ENABLEWANDB=1` and you've logged in via `wandb login` (or set `WANDB_API_KEY`), you'll see visualisations appear in the wandb dashboard in real time while the job runs.

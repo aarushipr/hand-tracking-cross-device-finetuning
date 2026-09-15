@@ -1,125 +1,10 @@
 """
-HOT3DKeypointDataset -- live-loading 3D keypoint + depth ground truth for
-KeyNet, from the full HOT3D dataset (via Hot3dDataProvider).
-
-One sample = one hand crop (matching RandoDataset's contract in
-RandoData.py), not one frame -- a frame with both hands visible
-contributes two samples.
-
-Keypoints come from umetrack_hand_data_provider.get_hand_landmarks(),
-reordered via hot3d_keypoint_mapping.hot3d_landmarks_to_project_keypoints
-(see that module's docstring for the thumb-joint approximation caveat),
-then projected into 2D through the camera's real calibration.
-
-Depth is NOT raw metric distance in meters. It matches ArtificialData's
-native convention exactly, traced from cpp/dataloader/dataloader_pybind.cpp's
-add_rel_depth()/hand_length(): each joint's full 3D distance from the
-camera, minus the middle-proximal joint's own distance from the camera,
-divided by the wrist-to-middle-pxm "hand size" scale. This is why
-maker_of_augmentations.py's depth formula expects a small value roughly
-in [-1.5, 1.5] rather than a metric depth in meters.
-
-Cropping reuses RandoDataset's own crop()/add_2d_noise_to_keypoints()/
-rotate_hand() directly from RandoData.py, rather than reimplementing
-that logic, so crops match what the network already expects. The one
-deliberate departure: RandoData.py's rotate_hand() only ever operates on
-(21,2) arrays, silently discarding the z/depth column -- a known,
-already-documented bug in that file. Here we use a small
-depth-preserving replacement, _rotate_hand_keep_depth, since depth (in
-this project's relative-depth convention) is unaffected by a 2D affine
-crop/rotation, so it can simply be carried through untouched instead of
-being dropped.
-
-elbow/curls are unconditionally zeroed -- HOT3D has no body-pose data to
-derive them from.
-
-
-WHY THE INDEX HOLDS PROJECTED KEYPOINTS AND PER-JOINT VALIDITY
-----------------------------------------------------------------
-Version 1 of this index admitted a sample whenever its 2D bounding box
-cleared min_visibility_ratio, and only discovered later -- inside
-__getitem__, with nothing useful left to do about it -- that some of the
-21 joints projected behind the camera or outside the camera model's valid
-region. The only recourse there was to return a blank placeholder sample.
-
-Measured on the archived Aria-only test split, that happened to **40% of
-all samples** -- the figure has not been re-measured on the mixed split.
-Worse, the placeholder was labelled is_hand=1, so it was not a negative
-example but a mislabelled positive: a black image asserting that a hand
-was present at 21 coincident points. Training on it would have actively
-taught the network that blank images contain hands.
-
-Version 2 fixed the mislabelling by moving the full projection into index
-construction and rejecting a hand outright if any single joint failed.
-That is correct but wasteful: a hand failing on one fingertip still has
-20 perfectly good joints worth training on.
-
-Version 3 (current) keeps per-joint validity instead of collapsing it to
-one pass/fail decision for the whole hand. Each entry carries a (21,2)
-array of (xy_valid, depth_valid) alongside its keypoints. A hand is
-rejected outright only if literally no joint is usable; otherwise it is
-kept, with __getitem__ masking each invalid joint out of its specific
-loss term (see xy_valid_per_joint / depth_valid_per_joint) instead of
-discarding the whole sample. See _project_hand for why depth validity
-additionally depends on the wrist and middle-proximal joints specifically.
-
-Three consequences carried over from version 2 still hold:
-
-1. No mislabelled placeholder samples reach training.
-2. Index building itself reads no image data, only poses and calibration,
-   so the validity check is nearly free regardless of how many joints it
-   inspects.
-3. __getitem__ reduces to: read image, crop, augment. Every pose lookup
-   and projection is precomputed and cached, so the per-sample cost is
-   now dominated purely by the .vrs image read.
-
-The residual _empty_sample() path (a genuinely unreadable image) is now
-rare, and is labelled is_hand=0 / has_xy=0 / has_depth=0, with every
-per-joint flag also 0, so it contributes no gradient at all rather than a
-wrong one.
-
-
-SAMPLE INDEX, CACHING, AND FRAME STRIDE
----------------------------------------
-The index deliberately holds only plain data -- sequence, image stream,
-timestamp, handedness, the 21x3 projected keypoints, and a 21x2
-per-joint validity flag -- and never a live provider object. An earlier version stored the open
-Hot3dDataProvider in every sample tuple, which forced every sequence's
-.vrs to be opened before training could begin and made the index
-impossible to serialise. Over the cluster's network storage that cost
-~44 minutes of wall-clock at ~73 seconds of CPU, and it was paid again in
-full on every run.
-
-1. The per-sequence index is cached to disk (see index_cache_dir). The
-   cache key includes min_visibility_ratio, frame_stride and
-   INDEX_FORMAT_VERSION, so changing any of them -- or changing the
-   sampling logic here and bumping the version -- invalidates stale
-   caches automatically instead of silently reusing them. Writes go to a
-   temporary file and are then os.replace()d into position, so a job
-   killed mid-write cannot leave a half-written index behind.
-
-2. Providers open lazily, on first access to a sample from that sequence,
-   and are then kept open. They are deliberately NOT evicted:
-   DataLoader(shuffle=True) draws consecutive samples from unrelated
-   sequences, so any LRU policy would thrash. Construction therefore does
-   no I/O once the cache is warm.
-
-   With num_workers>0, each worker MUST clear this cache in its
-   worker_init_fn -- see worker_init() below.
-
-3. frame_stride subsamples timestamps. HOT3D's cameras run at 30 Hz, so
-   consecutive frames are near-duplicates. Set frame_stride=1 to
-   reproduce exhaustive sampling.
-
-Usage:
-    ds = HOT3DKeypointDataset(
-        sequence_dirs=[".../P0003_c701bd11"],
-        hot3d_repo_root="/storage/user/praa/hot3d_full_setup/hot3d_repo/hot3d",
-        object_library_path=".../dataset/assets",
-        min_visibility_ratio=0.2,
-        frame_stride=10,
-        index_cache_dir="/storage/user/praa/scratch/hot3d_keypoint_index",
-    )
+Live-loading keypoint and depth ground truth for KeyNet from the full HOT3D
+dataset. One sample is one hand crop. Depth is not metric: it is each joint's
+camera distance minus the middle-proximal joint's, over the wrist-to-middle-pxm
+hand size, so it lands in about [-1.5, 1.5]. Validity is per joint, not per hand,
+and a hand is dropped only when no joint is usable. The index holds plain data and
+is cached per sequence; with num_workers>0 see worker_init().
 """
 import os
 import random
@@ -140,21 +25,12 @@ from maker_of_augmentations import AugmentationMaker
 from a_aug_config import aug_config_validatoor
 
 
-# Bump whenever the sampling logic below changes in a way that would produce
-# a different index for the same inputs. Caches built by an older version are
-# then ignored rather than silently reused.
-#   1 -> box-visibility gate only; invalid projections became blank samples
-#   2 -> full projection validity gate at index time; keypoints cached
-#   3 -> per-joint validity retained instead of rejecting the whole hand on
-#        any single joint failure; a hand is now dropped only if literally
-#        no joint is usable. Adds a (21,2) per-joint (xy_valid, depth_valid)
-#        array to the cached index.
+# Bump when the sampling logic changes, so stale caches are ignored not reused.
+# 1 box-visibility only; 2 projection gate at index time; 3 per-joint validity.
 INDEX_FORMAT_VERSION = 3
 
 
-# Guards get_pose_at_timestamp against the spurious 0ns sentinel found in
-# QuestDataProvider's merged timestamp list (~45s off any real pose,
-# confirmed empirically -- every genuine timestamp matched at 0ns delta).
+# Guards against the spurious 0ns sentinel in QuestDataProvider's merged timestamps.
 MAX_POSE_TIME_DELTA_NS = 50_000_000  # 50ms; inter-frame gap is ~33ms
 
 
@@ -189,7 +65,7 @@ def worker_init(worker_id):
     num_workers > 0.
 
     Workers are forked processes, so they inherit whatever providers the
-    parent already had open -- and two processes reading the same C++ VRS
+    parent already had open, and two processes reading the same C++ VRS
     file handle is exactly what produced garbled timestamps and JPEG decode
     failures previously. Clearing the cache here forces each worker to open
     its own providers on first access, so no handle is ever shared.
@@ -245,22 +121,9 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
-        # Quest 3 HOT3D recordings carry no TimeCode track, so any code path
-        # that reaches AriaDataProvider raises without this. Both detection
-        # paths (HOT3DVRSDetectionDataset, eval_detnet.py) already apply it;
-        # this class did not, which was survivable only while training was
-        # Aria-only. Under the mixed split Quest sequences reach this class on
-        # every run. The shim is idempotent and a no-op for Aria.
-        #
-        # Note the shim's own scope caveat: it was verified against the
-        # detection ground truth (box2d_hands.csv), not against the UmeTrack
-        # keypoint ground truth this class reads. Applying it here is
-        # necessary, not sufficient -- run py/evaluation/check_quest_keypoints.py
-        # against a real Quest sequence before trusting Quest keypoint labels.
-        # Defensive sys.path insert: this class is usually imported from a
-        # caller that already put the mercury_train root on sys.path (e.g.
-        # kpest_trainer.py, eval_keynet.py), but don't assume that here --
-        # same pattern as HOT3DVRSDetectionDataset.
+        # Quest 3 has no TimeCode track, so anything reaching AriaDataProvider raises without this.
+        # Verified for detection GT only; run check_quest_keypoints.py before trusting Quest labels.
+        # Defensive sys.path insert: callers usually do this already, but don't assume it.
         _mercury_train_root = os.path.abspath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
         if _mercury_train_root not in sys.path:
@@ -290,8 +153,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         self._object_library = load_object_library(
             object_library_folderpath=object_library_path)
 
-        # seq_dir -> _SequenceProviders, lazily populated, never evicted.
-        # Cleared per worker process by worker_init() above.
+        # seq_dir -> providers, lazy and never evicted; cleared per worker by worker_init().
         self._open_sequences = {}
 
         if self.index_cache_dir:
@@ -332,9 +194,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                   f"rejected, {pct:.1f}%, no joint at all usable; remaining "
                   f"samples may still have individual joints masked out)")
 
-    # ------------------------------------------------------------------
-    # Sample index: build, cache, load
-    # ------------------------------------------------------------------
+    # --- Sample index: build, cache, load --------------------------------------
 
     def _cache_path(self, seq_dir):
         if not self.index_cache_dir:
@@ -417,7 +277,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
         A joint is xy-invalid if it falls behind the camera or outside the
         camera model's valid region; its x_px/y_px are left at 0 here and
-        must not be trained on directly -- see __getitem__, which substitutes
+        must not be trained on directly; see __getitem__, which substitutes
         a geometry-safe placeholder before cropping, and xy_valid_per_joint,
         which keeps it out of the loss regardless of that placeholder value.
 
@@ -447,12 +307,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         if not xy_valid.any():
             return None  # nothing usable in this hand at all
 
-        # Relative depth, matching ArtificialData's native convention exactly
-        # (see module docstring): each joint's full 3D distance from the
-        # camera, minus the middle-proximal joint's own distance from the
-        # camera, divided by the wrist-to-middle-pxm "hand size". Both anchor
-        # joints (wrist, middle-proximal) must themselves be xy-valid, or no
-        # joint's depth is computable this frame.
+        # Relative depth (see module docstring); wrist and middle-pxm must both be xy-valid.
         depth_valid = np.zeros(21, dtype=bool)
         if xy_valid[0] and xy_valid[9]:
             hand_size = np.linalg.norm(world_keypoints[0] - world_keypoints[9])
@@ -496,8 +351,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                 if hand_poses_with_dt is None:
                     continue
 
-                # Fetched once per (stream, timestamp): it carries both hands,
-                # so re-fetching it inside the per-hand loop was pure waste.
+                # Fetched once per (stream, timestamp): it carries both hands.
                 box_result = bundle.hand_box2d_provider.get_bbox_at_timestamp(
                     stream_id=stream_id,
                     timestamp_ns=ts,
@@ -508,17 +362,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
                     continue
 
                 for hand_pose_data in hand_poses_with_dt.pose3d_collection.poses.values():
-                    # Unlike HOT3DVRSDetectionDataset (which keeps every frame,
-                    # including hand-free ones, as negative exists=0 examples
-                    # for DetNet's detection task), KeyNet has no hand-presence
-                    # signal to train here -- it only ever consumes an
-                    # already-cropped hand image, and hand presence is DetNet's
-                    # responsibility. A hand that isn't visible enough simply
-                    # has no valid crop, so it is skipped entirely.
-                    #
-                    # ASSUMED 0=left, 1=right, matching
-                    # HOT3DVRSDetectionDataset's own (also unverified)
-                    # assumption for this same box2d data.
+                    # KeyNet has no hand-presence signal to train; an unusable hand is just skipped.
+                    # ASSUMED 0=left, 1=right, as in HOT3DVRSDetectionDataset.
                     hand_index = 0 if hand_pose_data.is_left_hand else 1
                     hand_box = box_result.box2d_collection.box2ds.get(hand_index)
                     if hand_box is None or hand_box.box2d is None:
@@ -549,9 +394,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
         return entries, n_candidates
 
-    # ------------------------------------------------------------------
-    # Providers
-    # ------------------------------------------------------------------
+    # --- Providers -------------------------------------------------------------
 
     def _providers_for(self, seq_dir):
         bundle = self._open_sequences.get(seq_dir)
@@ -565,7 +408,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         )
         device_data_provider = hot3d_data_provider.device_data_provider
 
-        # Skip the RGB camera -- same reasoning as HOT3DVRSDetectionDataset:
+        # Skip the RGB camera, same reasoning as HOT3DVRSDetectionDataset:
         # this project's camera model is 2 monochrome cameras, matching the
         # target headset hardware. (Quest recordings have no RGB stream at
         # all, so this is a no-op there.)
@@ -597,7 +440,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         QuestDataProvider.__init__ assigns this exact merged list to every
         stream_id anyway (see its _stream_timestamps_sorted), so using it
         directly per-stream is equivalent to what get_frameset_from_timestamp
-        would resolve to here -- no separate frameset step needed.
+        would resolve to here; no separate frameset step needed.
 
         The Quest branch below is on the live training path: the mixed split
         (see py/training/common/hot3d_split.py) puts Quest recordings into
@@ -608,14 +451,10 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
             return bundle.device_data_provider.get_sequence_timestamps(
                 stream_id, self._TimeDomain.TIME_CODE)
 
-        # get_pose_at_timestamp/get_bbox_at_timestamp treat time_domain as a
-        # guard clause only, no conversion -- verified against real Quest
-        # data (see MAX_POSE_TIME_DELTA_NS above), so this is safe.
+        # time_domain is a guard clause only, no conversion; verified against real Quest data.
         return bundle.device_data_provider.get_sequence_timestamps()
 
-    # ------------------------------------------------------------------
-    # Dataset protocol
-    # ------------------------------------------------------------------
+    # --- Dataset protocol ------------------------------------------------------
 
     def __len__(self):
         return self.actual_size * self.num_times_to_repeat
@@ -631,13 +470,8 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         xy_valid_per_joint = self._valid[idx, :, 0].copy()
         depth_valid_per_joint = self._valid[idx, :, 1].copy()
 
-        # Joints that failed projection have no real position (see
-        # _project_hand). Substitute the average of this hand's own valid
-        # joints, purely so the crop-selection geometry below -- which looks
-        # at all 21 points together -- isn't thrown off by a meaningless
-        # outlier value. This substitute is never used as a training target:
-        # xy_valid_per_joint / depth_valid_per_joint mask it out of the loss
-        # regardless of what value ends up here.
+        # Failed joints take this hand's valid-joint mean so crop geometry isn't skewed.
+        # Never a training target: the per-joint masks drop it from the loss.
         if not xy_valid_per_joint.all():
             valid_mean_xy = keypoints_px_and_depth[xy_valid_per_joint, :2].mean(axis=0)
             keypoints_px_and_depth[~xy_valid_per_joint, :2] = valid_mean_xy
@@ -647,33 +481,17 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
 
         image = bundle.device_data_provider.get_image(ts, stream_id)
         if image is None:
-            # Rare -- every other failure mode is now caught at index time.
+            # Rare; every other failure mode is now caught at index time.
             return self._empty_sample()
 
         if self.eval_mode:
-            # Deterministic: crop centred on the ground truth, at the centre
-            # of the rotation and radius distributions training samples from.
-            # See the eval_mode note in __init__.
+            # Deterministic: crop centred on GT, at the centre of both distributions.
             from py.evaluation import preprocess_baseline as _pp
             trans = _pp.keynet_crop_matrix(keypoints_px_and_depth[:, :2], is_right)
             predicted_px = None
         else:
-            # Same cropping approach as RandoDataset: derive the crop from a
-            # NOISED version of the keypoints (simulating a previous frame's
-            # imperfect prediction, not oracle-perfect current-frame GT).
-            #
-            # Checked explicitly for the mixed split, because Aria and Quest
-            # SLAM frames differ in resolution (measured: ~640x480 against
-            # ~1148x1016) and an augmentation calibrated in absolute pixels
-            # would then be a different perturbation per device. It is not.
-            # add_2d_noise_to_keypoints derives both its standard deviations
-            # from bsqr(kps), the hand's own bounding-square side in that
-            # frame (stddev_overall = 0.3 * sz, per-joint = 0.07 * sz), and
-            # its homothety and rotation terms are unitless. crop() likewise
-            # sizes the crop from bsqr/palm_length_2d rather than from the
-            # frame. Every term is therefore relative to the hand, so the two
-            # devices receive the same augmentation in hand-relative units and
-            # no device-conditional constant is needed.
+            # Crop from a NOISED copy of the keypoints, as RandoDataset does.
+            # All terms are hand-relative, so Aria and Quest get the same augmentation.
             noisy_keypoints = add_2d_noise_to_keypoints(keypoints_px_and_depth[:, :2])
             trans = crop(image, noisy_keypoints, is_right)
 
@@ -681,9 +499,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         keypoints_cropped = _rotate_hand_keep_depth(keypoints_px_and_depth, trans)
 
         if not self.eval_mode:
-            # Matches RandoDataset's own "30% chance of no predicted input"
-            # convention, so this data source behaves consistently with the
-            # rest of KeyNet's training data.
+            # Matches RandoDataset's 30%-chance-of-no-predicted-input convention.
             predicted_px = None
             if random.uniform(0, 1) >= 0.3:
                 predicted_px = rotate_hand(noisy_keypoints, trans)
@@ -708,7 +524,7 @@ class HOT3DKeypointDataset(torch.utils.data.Dataset):
         Flagged is_hand=0 / has_xy=0 / has_depth=0, with every per-joint
         validity flag also 0, so every loss term masks it out and it
         contributes no gradient. Version 1 of this class left is_hand=1,
-        which made each placeholder a mislabelled POSITIVE -- a black image
+        which made each placeholder a mislabelled POSITIVE; a black image
         asserting a hand was present at 21 coincident points. That is not a
         negative training example, it is a wrong one.
 

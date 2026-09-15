@@ -10,7 +10,7 @@
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# KeyNet Training Job — PHASE 2: Phanesim fine-tuning on top of the phase-1
+# KeyNet Training Job. PHASE 2: Phanesim fine-tuning on top of the phase-1
 # HOT3D checkpoint. See kpest_trainer_phanesim.py's docstring for why this
 # is a separate script/checkpoint dir from phase 1. Mirrors
 # detection_phanesim.sbatch's own structure.
@@ -29,16 +29,16 @@ export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/openc
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 
-# Disable GUI -- there is no display on the cluster. This is required;
+# Disable GUI; there is no display on the cluster. This is required;
 # without it, visualizer.py's periodic display_and_log_output() calls
 # cv2.imshow and crashes with "The function is not implemented" the
 # first time it fires. Copied from train.sbatch (phase 1's own working
-# KeyNet job), which already has this -- missed it when first writing
+# KeyNet job), which already has this; missed it when first writing
 # this script since trainer_detection_phanesim.py has no GUI code path
 # at all. Confirmed 2026-09-09 (job 1700705).
 export AD4_ENABLEGUI=0
 
-# Real run should track to wandb like phase 1's train.sbatch does --
+# Real run should track to wandb like phase 1's train.sbatch does,
 # unlike the smoke test, which deliberately leaves this unset (off)
 # so tiny 2-clip loadfast runs don't clutter the dashboard.
 export AD4_ENABLEWANDB=1
@@ -50,11 +50,11 @@ SCRIPT_DIR="$REPO_ROOT/py/training/keypoint"
 # Pre-flight checks (confirm before submitting this real job):
 # 1. py/training/keypoint/local_config.py has phanesim_dataset_roots
 #    pointing at both dataset roots under /storage/user/praa/phanesim_dataset/
-#    (local_config.py is gitignored -- added by hand, see local_config_cluster.py).
-# 2. checkpoints_train_mixed/checkpoint_best.pth (phase 1) exists here --
+#    (local_config.py is gitignored, added by hand, see local_config_cluster.py).
+# 2. checkpoints_train_mixed/checkpoint_best.pth (phase 1) exists here;
 #    this job loads it as its starting weights; it does NOT retrain from
 #    scratch or touch that file.
-# 3. checkpoints_phanesim_phase2/ does not exist yet -- nothing for this
+# 3. checkpoints_phanesim_phase2/ does not exist yet; nothing for this
 #    run to collide with.
 # 4. AD4_LOADFAST=1 smoke test (checkpoints_loadfast_phanesim/) completed
 #    successfully before this real job was ever submitted.

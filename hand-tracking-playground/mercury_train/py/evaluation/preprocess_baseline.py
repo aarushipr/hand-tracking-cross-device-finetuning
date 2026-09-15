@@ -1,95 +1,11 @@
 """
-The baseline input convention, defined exactly once.
-
-WHY THIS MODULE EXISTS
-----------------------
-The shipped DetNet and KeyNet weights were trained on a particular input
-format and cannot adapt to another one. Every consumer of those weights --
-the zero-shot baseline evaluation, the fine-tuned model's evaluation, and
-the fine-tuning itself -- therefore has to reproduce that format, or the
-comparison between them measures format mismatch instead of model quality.
-
-Previously each consumer reproduced it separately: the detection evaluator
-ported the geometry from Monado's C++ runtime, the keypoint evaluator
-inherited it from the training dataset, and the detection training dataset
-did neither. They disagreed, silently, in ways that produce plausible
-numbers rather than crashes. This module is the single definition they now
-all import.
-
-SOURCE OF TRUTH
----------------
-Where the C++ runtime (hg_model.cpp) and the original training code
-disagree, THE TRAINING CODE WINS. The weights encode what they were trained
-on, not what the runtime later does with their output. `detection/
-augmentation.py` and `keypoint/maker_of_augmentations.py` in this repository
-are byte-identical to the upstream author's originals (verified by diff
-against original-code/), so they are the authoritative record of that
-convention. The runtime is a second-hand witness and, on the `size` output,
-a demonstrably unreliable one -- see SIZE_DECODE below.
-
-WHAT THE CONVENTION IS
-----------------------
-Shared by both networks:
-    Photometric: normalizeGrayscaleImage -- rescale so stddev = 0.25, then
-    shift so mean = 0.5, recomputing the mean between the two steps. Not
-    /255, not ImageNet statistics. Implemented once in
-    py.training.common.a_geometry.normalize_grayscale_exact.
-
-DetNet:
-    Geometry: the whole frame, upright, scaled to fit inside 160x160 with
-    centre padding (Monado's `blackbar`). Sensor frames that are not
-    natively upright must be rotated first -- see ORIENTATION below.
-    Outputs: hand_exists in [0,1] (sigmoid); cx, cy in [-1,1] across the
-    160x160 frame; size as a FRACTION OF FRAME WIDTH of the box's
-    max(width, height).
-
-KeyNet:
-    Geometry: a 128x128 crop centred on the hand, right hands mirrored so
-    the network only ever sees left-hand geometry.
-    Photometric: an sRGB EOTF is applied before normalisation. This is
-    physically odd for monochrome sensor data and is nonetheless part of
-    the convention -- it is in the original author's
-    maker_of_augmentations.do_one_augmentation, so the weights were trained
-    with it. Do not "fix" it.
-    Outputs: per joint, a 22x22 xy heatmap and a 22-bin depth histogram.
-
-ORIENTATION
------------
-`augment_image` applies only a small random rotation (+/- 0.1 pi) about the
-frame centre. It never applies a camera-mount rotation. The baseline weights
-therefore expect upright imagery, which the upstream training corpora
-(synthetic renders, EgoHands, EPIC-KITCHENS) all are. HOT3D's SLAM cameras
-are not: both Aria and Quest 3 need a 270-degree rotation, confirmed by
-dumping the letterboxed crop at all four rotations for real frames of each
-device (dump_orientation_check.py). That rotation is part of reproducing the
-convention, and `rotate_upright()` below exists so training and evaluation
-apply the identical one.
-
-SIZE_DECODE
------------
-`augmentation.imgwithboundingboxes320_to_heatmaps_2hand` defines the target:
-
-    output['size'][idx] = map_ranges(bbox.w, 0, w, 0, 1)
-
-with `bbox.w` already set to max(w, h) by `augment_image`. So `size` is the
-box's larger side divided by the 160-pixel frame width, and recovering
-pixels is a single multiply by 160.
-
-hg_model.cpp instead does `size *= kDetectionInputSize * 2.0f`. The previous
-evaluator copied that multiply without whatever halving cancels it downstream
-in the C++, making every predicted box exactly twice as wide as intended.
-That is not a hypothesis. It was measured: the shipped
-grayscale_detection_160x160.onnx was run on eleven annotated hand
-photographs, the ground-truth boxes recovered from the annotations, and 14
-confident predictions matched to them by centre distance.
-
-    decode                    median predicted width / ground-truth width
-    size * 160                                   0.986
-    size * 160 * 2                               1.971
-
-The reproduction script is convention_check/quant_size_check.py. A factor of
-two in box width costs roughly half the achievable IoU, which is why the old
-evaluator reported a near-zero mean IoU and read it as a weak baseline.
+The baseline input convention, defined exactly once, because every consumer of the
+shipped weights must reproduce it or the comparison measures format mismatch.
+Where hg_model.cpp and the training code disagree, the training code wins.
+Photometric: stddev 0.25 then mean 0.5, not /255. DetNet letterboxes to 160x160
+and `size` is a fraction of frame width, one multiply by 160, not the runtime's
+extra *2. KeyNet crops 128x128, right hands mirrored, sRGB EOTF applied. HOT3D
+frames need rotate_upright(270) first.
 """
 import os
 import sys
@@ -104,10 +20,8 @@ if _MERCURY_TRAIN_ROOT not in sys.path:
 
 from py.training.common.a_geometry import normalize_grayscale_exact
 
-# ---------------------------------------------------------------------------
-# Constants. These are the convention; changing one invalidates every number
-# produced before the change.
-# ---------------------------------------------------------------------------
+# --- Constants -------------------------------------------------------------
+# These are the convention; changing one invalidates every number produced before.
 
 DETECTION_INPUT_SIZE = 160          # detection/header.py model_input_{width,height}
 KEYPOINT_CROP_SIZE = 128            # a_aug_config output_size
@@ -117,28 +31,22 @@ DEPTH_HALF_RANGE = 1.5              # z expected in [-1.5, 1.5]
 # See SIZE_DECODE in the module docstring. 1.0, not 2.0, and measured.
 SIZE_DECODE_FACTOR = 1.0
 
-# hg_sync.cpp: DEBUG_GET_ONCE_FLOAT_OPTION(mercury_min_detection_confidence,
-# "MERCURY_MIN_DETECTION_CONFIDENCE", 0.3), applied with strict >.
+# hg_sync.cpp: mercury_min_detection_confidence, default 0.3, applied with strict >.
 MIN_DETECTION_CONFIDENCE = 0.3
 
-# Confirmed per device by visual inspection at all four rotations
-# (dump_orientation_check.py): Aria 2026-08-08, Quest 3 2026-08-09.
+# Confirmed per device at all four rotations (dump_orientation_check.py), Aug 2026.
 DEVICE_ORIENTATION = {"Aria": 270, "Quest": 270, "Quest3": 270}
 
-# RandoData.crop draws these per sample during training. Evaluation holds
-# them at the centre of their distributions so a crop is a function of the
-# hand alone, not of the random seed.
+# Held at the centre of the training distributions, so a crop depends on the hand only.
 CROP_ROTATION_EVAL = 0.0
 CROP_RADIUS_SCALE_EVAL = 1.0        # RandoData: uniformcr(1.65, 0.2) / 1.65, mean 1.0
 
 
-# ---------------------------------------------------------------------------
-# Shared photometric step
-# ---------------------------------------------------------------------------
+# --- Shared photometric step ---------------------------------------------------
 
 def normalize_grayscale(img_uint8):
     """normalizeGrayscaleImage on a uint8 frame. Returns float32, or None on
-    an image of exactly zero variance -- the C++ bails out there and so does
+    an image of exactly zero variance; the C++ bails out there and so does
     evaluation, which can afford to drop one degenerate frame. Training
     cannot drop a sample mid-batch and substitutes noise instead; that
     divergence is deliberate and lives in a_geometry.normalizeGrayscaleImage.
@@ -146,9 +54,7 @@ def normalize_grayscale(img_uint8):
     return normalize_grayscale_exact(np.asarray(img_uint8, np.float32) / 255.0)
 
 
-# ---------------------------------------------------------------------------
-# DetNet geometry
-# ---------------------------------------------------------------------------
+# --- DetNet geometry -----------------------------------------------------------
 
 def rotate_upright(image, orientation):
     """Rotate a raw sensor frame into the upright orientation the weights
@@ -191,8 +97,8 @@ def compute_blackbar_transform(in_w, in_h, out_w, out_h):
 
     The camera-mount rotation that the C++ folds into this matrix is NOT
     included here. It is applied separately by rotate_upright() so that the
-    training pipeline -- which builds its own randomised affine and cannot
-    use this matrix -- can still apply the identical rotation.
+    training pipeline, which builds its own randomised affine and cannot
+    use this matrix, can still apply the identical rotation.
     """
     s = min(out_w / in_w, out_h / in_h)
     go = np.zeros((2, 3), dtype=np.float32)
@@ -260,9 +166,7 @@ def box_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
-# ---------------------------------------------------------------------------
-# KeyNet geometry
-# ---------------------------------------------------------------------------
+# --- KeyNet geometry -----------------------------------------------------------
 
 def _bounding_square(kps):
     lo = kps.min(axis=0)
@@ -283,8 +187,8 @@ def keynet_crop_matrix(keypoints_px, is_right,
     exposed as arguments instead of sampled internally.
 
     Training passes rotation ~ U(0, 2pi) and radius_scale ~ U(0.81, 1.18),
-    which is augmentation and belongs there. Evaluation uses the defaults --
-    the centre of both distributions -- so that a crop is a deterministic
+    which is augmentation and belongs there. Evaluation uses the defaults;
+    the centre of both distributions; so that a crop is a deterministic
     function of the hand, and the baseline and the fine-tuned model are
     scored on pixel-identical inputs. With unseeded random crops they are
     not, and the difference between two models is then partly the difference
@@ -321,9 +225,7 @@ def keynet_crop_matrix(keypoints_px, is_right,
     return cv2.getAffineTransform(np.float32(corners), dst)
 
 
-# ---------------------------------------------------------------------------
-# Self-check
-# ---------------------------------------------------------------------------
+# --- Self-check ----------------------------------------------------------------
 
 def self_check(verbose=True):
     """Round-trips known quantities through the transforms above and asserts
@@ -358,8 +260,7 @@ def self_check(verbose=True):
         assert abs((box[0] + box[2]) / 2 - cx_o) < 0.5
         say(f"  size round-trip {true_side:6.1f}px -> {got_side:6.1f}px  ok")
 
-    # 2. Rotation maps image and points consistently: a marked pixel must
-    #    land where rotate_points_upright says it will.
+    # 2. A marked pixel must land where rotate_points_upright says it will.
     for orientation in (0, 90, 180, 270):
         img = np.zeros((60, 100), np.uint8)
         py, px = 12, 77

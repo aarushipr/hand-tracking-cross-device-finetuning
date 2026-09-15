@@ -1,45 +1,29 @@
 """
-Participant-level train/test partitioning of the HOT3D catalogue.
-
-Two split designs live in this file, in two clearly separated blocks below:
-
-  CURRENT  -- "train_mixed" / "test_mixed". Aria and Quest recordings pooled
-              together and partitioned 80/20 at participant level. This is the
-              design the submitted thesis reports.
-
-  ARCHIVED -- "train" / "test_aria" / "test_quest" / "device_shift_quest" /
-              "cross_device_test". An Aria-only training set evaluated against
-              both devices, to isolate cross-device generalisation. Superseded,
-              kept intact so the earlier checkpoints and result files stay
-              scorable by exactly the code that produced them.
-
-Nothing in the archived block is called by the current training or evaluation
-path. Do not delete it and do not "modernise" it -- its value is that it still
-behaves exactly as it did when the archived numbers were produced.
+Participant-level train/test partitioning of the HOT3D catalogue. Two designs live
+below: the current train_mixed / test_mixed, Aria and Quest pooled and split 80/20
+by participant, which the thesis reports; and the archived Aria-only design, kept
+unchanged so its checkpoints and results stay scorable. Nothing in the archived
+block is reachable from the current path.
 """
 import json
 import os
 import random
 
-# ---------------------------------------------------------------------------
-# The catalogue
-# ---------------------------------------------------------------------------
+# --- The catalogue ---------------------------------------------------------
 
 def participant_id_of(seq_dir):
     """'P0003' from '/.../P0003_c701bd11'."""
     return os.path.basename(os.path.normpath(seq_dir)).split("_")[0]
 
 
-# HOT3D's own official test split. The recordings are public but their ground
-# truth is withheld, so they are unusable for both training and evaluation here
-# and are dropped before any split is computed.
+# HOT3D's official test split: public recordings with withheld GT, unusable here.
 NO_GT_TEST_PARTICIPANTS = {"P0004", "P0005", "P0006", "P0008", "P0016", "P0020"}
 
 
 def headset_of(seq_dir):
     """
     Return "Aria" or "Quest3" for one HOT3D sequence folder, read straight
-    from that sequence's own metadata.json -- the same "headset" field
+    from that sequence's own metadata.json; the same "headset" field
     that Hot3dDataProvider.get_device_type() dispatches on (see
     hot3d/data_loaders/PathProvider.py, Hot3dDataPathProvider.fromRecordingFolder).
 
@@ -66,30 +50,11 @@ def usable_sequence_dirs(all_seq_dirs):
             if participant_id_of(d) not in NO_GT_TEST_PARTICIPANTS]
 
 
-# ---------------------------------------------------------------------------
-# CURRENT DESIGN -- mixed Aria + Quest, 80/20 by participant
-# ---------------------------------------------------------------------------
-#
-# The partition is FROZEN as the two constants below rather than recomputed
-# from whatever sequence folders happen to exist on disk. Recomputing was the
-# original approach and it is unsafe for a reported result: an incomplete or
-# still-downloading dataset copy silently changes which participants are held
-# out, so the trainer and the evaluator can disagree, and a rerun weeks later
-# can disagree with both. Freezing makes the split a property of this file, not
-# of one machine's filesystem at one moment.
-#
-# These values were produced by _derive_mixed_split() below, run over the full
-# HOT3D catalogue (294 usable sequences: 136 Aria, 158 Quest, 13 participants).
-# The resulting proportions are:
-#
-#     Aria     109 train / 27 test   (80.1% train)
-#     Quest3   126 train / 32 test   (79.7% train)
-#     total    235 train / 59 test   (79.9% train)
-#
-# Re-derive and update them only if the usable catalogue itself changes, using:
-#     python py/training/common/hot3d_split.py <dataset_root>
-# which recomputes the split from disk and reports any disagreement with these
-# constants instead of silently overriding them.
+# --- CURRENT DESIGN: mixed Aria + Quest, 80/20 by participant --------------
+# Frozen as constants, not recomputed from disk: a partial copy would shift the split.
+# From _derive_mixed_split() over 294 sequences: 136 Aria, 158 Quest, 13 participants.
+#     Aria 109/27 (80.1%)   Quest3 126/32 (79.7%)   total 235/59 (79.9%)  train/test
+# Re-derive with: python py/training/common/hot3d_split.py <dataset_root>
 
 TRAIN_MIXED_PARTICIPANTS = {
     "P0002", "P0003", "P0009", "P0010", "P0011", "P0012", "P0013",
@@ -105,7 +70,7 @@ def _derive_mixed_split(seq_dirs, train_fraction=0.8):
     training and evaluation paths use those constants, not this function.
 
     Partitions PARTICIPANTS (not sequences), so no subject's recordings appear
-    on both sides -- a subject who appears in both train and test leaks
+    on both sides; a subject who appears in both train and test leaks
     person-specific appearance into the test score.
 
     The objective is per-device, not overall. Matching only the total sequence
@@ -136,10 +101,7 @@ def _derive_mixed_split(seq_dirs, train_fraction=0.8):
         pid = participant_id_of(d)
         device = headset_of(d)
         if device is None:
-            # Unreadable metadata.json -- headset_of's own documented
-            # behaviour. It cannot be placed on a device-aware objective, so
-            # it takes no part in choosing the split. It still lands in
-            # whichever side its participant is assigned to.
+            # Unreadable metadata.json; takes no part in the device-aware objective.
             continue
         per_device.setdefault(device, {})
         per_device[device][pid] = per_device[device].get(pid, 0) + 1
@@ -153,10 +115,7 @@ def _derive_mixed_split(seq_dirs, train_fraction=0.8):
     best_subset, best_cost = None, None
     for r in range(len(participants) + 1):
         for subset in combinations(participants, r):
-            # Worst relative deviation from the target fraction across
-            # devices. Relative, not absolute, so a device contributing fewer
-            # sequences is not allowed to drift further just because its
-            # absolute error stays small.
+            # Relative, not absolute, deviation: a smaller device can't drift further for free.
             cost = max(
                 abs(sum(per_device[dev].get(p, 0) for p in subset) / totals[dev]
                     - train_fraction)
@@ -174,7 +133,7 @@ def _assert_participants_assigned(usable_dirs):
     Every usable participant on disk must appear in the frozen split.
 
     A participant that appears in neither set would otherwise be dropped from
-    training and evaluation alike without a word -- the exact silent-data-loss
+    training and evaluation alike without a word; the exact silent-data-loss
     failure the freeze exists to prevent. Raising here costs a job submission;
     not raising costs a wrong result that looks fine.
     """
@@ -190,16 +149,10 @@ def _assert_participants_assigned(usable_dirs):
             f"and update both constants in {__file__}.")
 
 
-# ---------------------------------------------------------------------------
-# ARCHIVED DESIGN -- Aria-only training, cross-device evaluation
-# ---------------------------------------------------------------------------
-#
-# Superseded by the mixed split above. Retained unchanged so the checkpoints
-# and result files produced under it remain scorable. Not reachable from the
-# current training or evaluation path.
+# --- ARCHIVED DESIGN: Aria-only training, cross-device evaluation ----------
+# Superseded; kept unchanged so its checkpoints and results stay scorable.
 
-# Recorded on both Aria and Quest, which is what let the archived design hold
-# subject identity constant while varying only the capture device.
+# Recorded on both devices, which held subjects constant while varying the device.
 CROSS_DEVICE_HELD_OUT_PARTICIPANTS = {"P0002", "P0003", "P0010"}
 
 
@@ -210,24 +163,17 @@ def _archived_split(usable, split):
     train_pool = [d for d in usable
                   if participant_id_of(d) not in CROSS_DEVICE_HELD_OUT_PARTICIPANTS]
 
-    # Training was Aria-only by design. Mixing Quest recordings into training
-    # would have made a Quest evaluation measure generalisation to unseen
-    # *subjects* on an already-seen device, not to an unseen *device*.
+    # Aria-only by design; mixing Quest in would test new subjects, not a new device.
     if split == "train":
         return [d for d in train_pool if headset_of(d) == "Aria"]
 
-    # The same held-out participants, partitioned by capture device:
-    #   test_aria  -- new subjects, device seen during training
-    #   test_quest -- new subjects, device never seen during training
+    # Same held-out participants split by device: test_aria seen device, test_quest unseen.
     if split == "test_aria":
         return [d for d in held_out if headset_of(d) == "Aria"]
     if split == "test_quest":
         return [d for d in held_out if headset_of(d) == "Quest3"]
 
-    # Quest recordings of the TRAINING participants: never seen during
-    # training either, but the people in them ARE the people the model trained
-    # on. test_quest changes two things at once (new subjects AND a new
-    # device); this changes only the device.
+    # Quest recordings of TRAINING participants: changes only the device, not the subjects.
     if split == "device_shift_quest":
         return [d for d in train_pool if headset_of(d) == "Quest3"]
 
@@ -238,9 +184,7 @@ def _archived_split(usable, split):
     return None
 
 
-# ---------------------------------------------------------------------------
-# Public interface
-# ---------------------------------------------------------------------------
+# --- Public interface ------------------------------------------------------
 
 CURRENT_SPLITS = ("train_mixed", "test_mixed")
 ARCHIVED_SPLITS = ("train", "test_aria", "test_quest", "device_shift_quest",
@@ -297,9 +241,7 @@ def list_sequence_dirs(dataset_root, split):
     return filter_sequence_dirs(all_dirs, split)
 
 
-# ---------------------------------------------------------------------------
-# Pre-flight report
-# ---------------------------------------------------------------------------
+# --- Pre-flight report -----------------------------------------------------
 
 def _device_counts(seq_dirs):
     counts = {}
@@ -327,8 +269,7 @@ def _report(dataset_root):
         print(f"  {split:20s} {len(dirs):4d} seq  {_device_counts(dirs)}  "
               f"{' '.join(participants)}{tag}")
 
-    # Per-device train share of the current split -- the number the objective
-    # actually optimises, and the one worth eyeballing before a retrain.
+    # Per-device train share: the number the objective optimises, worth eyeballing.
     train_counts = _device_counts(list_sequence_dirs(dataset_root, "train_mixed"))
     test_counts = _device_counts(list_sequence_dirs(dataset_root, "test_mixed"))
     print("\n  current split, train share by device:")

@@ -122,9 +122,7 @@ class ArtificialDataset(torch.utils.data.Dataset):
         self.num_sequences = len(os.listdir(superroot))
 
         if (header.env_settings.loadfast):
-            # Was hardcoded to 25, which crashes if fewer sequences exist
-            # locally (e.g. the 15-sequence output/ sanity set) — cap at
-            # whatever's actually on disk instead.
+            # Was hardcoded to 25, which crashes on a smaller local set; cap at what's on disk.
             self.num_sequences = min(25, self.num_sequences)
 
         self.camera_poses_seq_array = np.zeros(
@@ -160,15 +158,8 @@ class ArtificialDataset(torch.utils.data.Dataset):
         out_curls = np.zeros((5), dtype=np.float32)
 
         numstr = pad_int(frame_idx)
-        # NOTE: these used to be hardcoded to a stale absolute path
-        # ("/4/generation_run_jan9/...") independent of `superroot` above,
-        # so the CSVs and the images could silently come from two different
-        # dataset locations (and would fail to load entirely for anyone
-        # whose data doesn't live at that exact literal path). Both now
-        # derive from the same `superroot` used for the CSV loading.
-        # Matches the actual on-disk naming from mlib.py's Blender output
-        # (file_name{NNNN}.png, mono 8-bit) — was "Image{numstr}.jpg", which
-        # doesn't match anything on disk and silently loaded nothing.
+        # Both now derive from the same `superroot`; a stale absolute path used to split them.
+        # Naming matches mlib.py output (file_name{NNNN}.png); the old .jpg matched nothing.
         img_color_path = os.path.join(superroot, seqname, "imgs_color", f"file_name{numstr}.png")
         img_alpha_path = os.path.join(superroot, seqname, "imgs_alpha", f"file_name{numstr}.png")
 
@@ -190,12 +181,8 @@ class ArtificialDataset(torch.utils.data.Dataset):
                 out_elbow,
                 out_curls)
         except Exception as e:
-            # A single missing/corrupt frame (e.g. cv2 "empty Mat" assertion
-            # when img_color_path fails to load) would otherwise kill an
-            # entire multi-hour unattended SLURM job over one bad file.
-            # Log which file failed and substitute a different random
-            # sample instead of crashing — bounded retries in case of a
-            # systemic problem rather than one bad frame.
+            # One missing or corrupt frame shouldn't kill a multi-hour unattended job.
+            # Log it and substitute another random sample; retries are bounded.
             print(f"[ArtificialData] WARNING: failed to load {img_color_path} "
                   f"({type(e).__name__}: {e}). Substituting a random sample.")
             if retries_left <= 0:

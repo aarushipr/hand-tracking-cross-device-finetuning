@@ -1,54 +1,9 @@
 """
-eval_sam3_boxes.py -- how good would SAM 3 be at annotating hand bounding boxes?
-
-Prompts SAM 3 with the text "hand" on HOT3D frames, derives an axis-aligned box
-from each returned mask, and scores those boxes against HOT3D's motion-capture
-ground truth using the same IoU definition eval_detnet.py uses. The question is
-not whether SAM is a good hand detector, it is whether a future custom corpus
-could be annotated automatically instead of by hand.
-
-WHY THIS DOES NOT REUSE THE MERCURY PREPROCESSING PATH
-------------------------------------------------------
-py/evaluation/preprocess_baseline.py exists to reproduce the input format the
-shipped DetNet and KeyNet weights were trained on -- letterbox to 160x160, and a
-contrast normalisation to stddev 0.25 / mean 0.5. None of that applies to SAM,
-which has its own internal resizing and normalisation. Feeding SAM a
-Mercury-normalised 160x160 crop would measure format mismatch rather than SAM.
-
-Exactly two preprocessing steps are applied here:
-
-  1. rotate_upright, using the same per-device orientation the rest of the
-     pipeline uses. SAM was trained on upright photographs, and this also puts
-     the image in the same coordinate frame as the ground-truth boxes.
-  2. grayscale replicated to three channels, because SAM's encoder expects RGB.
-
-Full sensor resolution is passed through untouched. Fisheye distortion is left
-in deliberately: that is what an annotator would actually be labelling.
-
---clahe adds contrast-limited histogram equalisation as a second condition,
-since a number of the Quest 3 SLAM frames are very dark.
-
-WHAT THE OVERLAYS SHOWED (2026-09-11)
--------------------------------------
-SAM does NOT segment whole arms, which was the worry going in. It segments the
-visually distinct hand, fingers and palm, and cuts at the wrist. HOT3D's box
-covers the full motion-capture hand and Section 4.2 then pads it by 15%. So
-SAM's boxes are systematically SMALLER than the ground truth and sit inside it,
-which is why the matched IoU sits just under 0.5 rather than scattering.
-
-That is a convention disagreement, not a localisation failure, and a convention
-disagreement can be corrected with one number. --scale-sweep measures how much
-of the gap a fixed expansion closes, and --gt-margin isolates how much of the
-offset is HOT3D's mocap box versus this project's own 15% padding choice.
-
-Sampling is random across the split with a fixed seed, never a prefix.
-eval_detnet.py's --limit truncates its sample list instead, which on this split
-yields six sequences from a single device.
-
-Usage:
-  python py/evaluation/eval_sam3_boxes.py --split test_mixed --limit 300 \
-      --sam-weights /path/to/sam3.pt --save-overlays results/sam3_overlays \
-      --out results/sam3_boxes.json
+How good would SAM 3 be at annotating hand boxes? Prompts it with "hand" on HOT3D
+frames and scores the results with eval_detnet.py's IoU. Only rotate_upright and
+grayscale-to-RGB are applied; Mercury's normalisation would measure format
+mismatch. SAM cuts at the wrist while HOT3D's box covers the whole hand plus 15%,
+so --scale-sweep measures how much of that gap a fixed expansion closes.
 """
 
 import argparse
@@ -72,9 +27,7 @@ from py.training.common.hot3d_split import list_sequence_dirs
 import py.training.detection.local_config as local_config
 
 
-# ---------------------------------------------------------------------------
-# Ground truth, reproduced exactly as HOT3DVRSDetectionDataset builds it
-# ---------------------------------------------------------------------------
+# --- Ground truth, exactly as HOT3DVRSDetectionDataset builds it ---------------
 
 def raw_sample(ds, idx):
     """Return (upright image, [gt boxes], headset) for one dataset index.
@@ -130,9 +83,7 @@ def raw_sample(ds, idx):
     return image, gt, headset
 
 
-# ---------------------------------------------------------------------------
-# SAM
-# ---------------------------------------------------------------------------
+# --- SAM -----------------------------------------------------------------------
 
 def masks_from_result(res, verbose=False):
     """Pull binary masks out of whatever Ultralytics returned.
@@ -294,10 +245,8 @@ def main():
         if (k + 1) % 25 == 0:
             print(f"[sam] {k+1}/{len(idxs)} frames")
 
-    # -----------------------------------------------------------------------
-    # Scoring. Scaling happens here rather than in the loop so the entire sweep
-    # reuses one pass of SAM inference.
-    # -----------------------------------------------------------------------
+    # --- Scoring ---------------------------------------------------------------
+    # Scaling happens here, not in the loop, so the sweep reuses one pass of inference.
 
     def scaled(b, f):
         cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
@@ -325,10 +274,8 @@ def main():
         prec = 100.0 * hit / pred if pred else 0.0
         mi = float(np.mean(vals)) if vals else 0.0
         md = float(np.median(vals)) if vals else 0.0
-        # Matched-pairs mean IoU answers "when SAM finds a hand, how good is the
-        # box". It is NOT comparable to eval_detnet.py's mean IoU, which averages
-        # over every ground-truth box including the ones the model missed. The
-        # second figure scores a miss as zero so the two CAN be put side by side.
+        # Matched-pairs mean IoU answers "when SAM finds a hand, how good is the box".
+        # Not comparable to eval_detnet.py's mean IoU; the second figure scores misses as zero.
         mi_all = float(sum(vals) / gt) if gt else 0.0
         print(f"  {tag:10s} gt={gt:5d} pred={pred:5d}  recall {rec:6.2f}%  "
               f"precision {prec:6.2f}%  IoU(matched) {mi:.4f}  median {md:.4f}  "

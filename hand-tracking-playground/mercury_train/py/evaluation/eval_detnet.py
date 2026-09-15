@@ -1,46 +1,9 @@
 """
-eval_detnet.py -- score a set of DetNet weights against a HOT3D split.
-
-Replaces hot3d_baseline_detection_eval.py, which could only run the shipped
-ONNX baseline and decoded its `size` output twice as large as the training
-target defines it (see preprocess_baseline.SIZE_DECODE). Its numbers should
-not be carried forward.
-
-WHAT IS MEASURED
-----------------
-Per (frame, camera stream, hand slot):
-  - IoU between the predicted box and HOT3D's own occlusion-aware ground
-    truth from box2d_hands.csv, for hands the ground truth says are present
-  - centre error in pixels
-  - whether the existence head agreed with the ground truth, at Monado's own
-    production threshold of 0.3 (strict >)
-aggregated overall and stratified by HOT3D's `visibility_ratio`, because a
-detector's behaviour on a hand that is 30 % visible is a different question
-from its behaviour on one in full view, and a single mean hides that.
-
-ONE CODE PATH FOR BOTH MODELS
------------------------------
---weights takes either `monado` (the shipped grayscale_detection_160x160.onnx,
-zero-shot) or a path to a fine-tuned checkpoint. Both are preprocessed,
-decoded and scored by the identical code below, so a difference between the
-two numbers is a difference between the two models. The previous script
-could only run the ONNX, which meant the fine-tuned model would have had to
-be scored by some second script -- exactly the arrangement that let the two
-conventions drift apart in the first place.
-
-PREPROCESSING
--------------
-Imported from preprocess_baseline, not restated here. Read that module's
-docstring for what the convention is and why the training code rather than
-the C++ runtime defines it.
-
-Usage:
-    python py/evaluation/eval_detnet.py --weights monado --split test_mixed \
-        --out results/detnet_baseline_mixed.json
-
-    python py/evaluation/eval_detnet.py \
-        --weights py/training/detection/checkpoints/checkpoint_best.pth \
-        --split test_mixed --out results/detnet_finetuned_mixed.json
+Scores a set of DetNet weights against a HOT3D split. --weights takes either
+`monado`, the shipped ONNX run zero-shot, or a checkpoint path; both go through
+identical preprocessing, decoding and scoring, so a difference between them is a
+difference in the weights. Measures IoU, centre error and existence agreement at
+Monado's 0.3 threshold, stratified by visibility_ratio.
 """
 import argparse
 import csv
@@ -64,9 +27,7 @@ DETECTION_MODEL_FILENAME = "grayscale_detection_160x160.onnx"
 VISIBILITY_BANDS = [(0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]
 
 
-# ---------------------------------------------------------------------------
-# Ground truth
-# ---------------------------------------------------------------------------
+# --- Ground truth --------------------------------------------------------------
 
 class Hot3dRawFrameSource:
     """Raw frames plus unmargined ground-truth boxes.
@@ -83,10 +44,7 @@ class Hot3dRawFrameSource:
         if hot3d_repo_root not in sys.path:
             sys.path.insert(0, hot3d_repo_root)
 
-        # Quest 3 recordings carry no TimeCode reference and raise from
-        # AriaDataProvider.__init__ without this. See
-        # py/training/common/hot3d_timecode_compat.py for why DEVICE_TIME is
-        # the correct fallback rather than a way of silencing the error.
+        # Quest 3 has no TimeCode reference; see hot3d_timecode_compat.py for the fallback.
         from py.training.common.hot3d_timecode_compat import patch as _patch
         _patch()
 
@@ -124,9 +82,7 @@ class Hot3dRawFrameSource:
                     seq_samples.append((seq_name, headset, provider, box2d, stream_id, ts))
 
             if max_samples_per_sequence and len(seq_samples) > max_samples_per_sequence:
-                # Strided, not the first N: consecutive frames are near
-                # duplicates, so taking a prefix would sample one moment of
-                # the sequence rather than the sequence.
+                # Strided, not the first N: a prefix would sample one moment, not the sequence.
                 idx = np.linspace(0, len(seq_samples) - 1, max_samples_per_sequence, dtype=int)
                 seq_samples = [seq_samples[i] for i in idx]
             self.samples.extend(seq_samples)
@@ -156,9 +112,7 @@ class Hot3dRawFrameSource:
         return seq_name, headset, str(stream_id), ts, image, boxes
 
 
-# ---------------------------------------------------------------------------
-# Splits
-# ---------------------------------------------------------------------------
+# --- Splits --------------------------------------------------------------------
 
 SPLIT_CHOICES = [
     # Current mixed Aria+Quest design.
@@ -188,9 +142,7 @@ def sequence_dirs_for_split(dataset_root, split):
     return hot3d_split.list_sequence_dirs(dataset_root, split)
 
 
-# ---------------------------------------------------------------------------
-# Models. Both expose the same call signature so scoring never branches.
-# ---------------------------------------------------------------------------
+# --- Models, one call signature so scoring never branches ----------------------
 
 class OnnxDetector:
     name = "monado (zero-shot, no fine-tuning)"
@@ -207,8 +159,7 @@ class OnnxDetector:
         self.out_names = [o.name for o in self.sess.get_outputs()]
         self.in_name = self.sess.get_inputs()[0].name
 
-        # Asserted, not printed and eyeballed. The old script printed the
-        # shapes for the first sample and asked the reader to check them.
+        # Asserted, not printed for the reader to eyeball as the old script did.
         in_shape = list(self.sess.get_inputs()[0].shape)
         assert in_shape == [1, 1, pp.DETECTION_INPUT_SIZE, pp.DETECTION_INPUT_SIZE], \
             f"unexpected input shape {in_shape}"
@@ -232,8 +183,7 @@ class TorchDetector:
 
         self.torch = torch
         model = DetNet.DetNet()
-        # Gives the bias-free convs real bias parameters, matching what
-        # trainer_detection.py does before it checkpoints anything.
+        # Gives the bias-free convs real bias params, as trainer_detection.py does.
         load_detnet_weights(model)
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state = ckpt.get("state_dict", ckpt)
@@ -259,9 +209,7 @@ def build_model(weights, models_dir):
     return m, m.name
 
 
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
+# --- Scoring -------------------------------------------------------------------
 
 def summarise(rows):
     def mean(xs):

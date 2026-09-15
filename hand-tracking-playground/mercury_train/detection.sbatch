@@ -13,14 +13,14 @@
 # ↑ raised from the partition's untouched 08:00:00 default, on the same
 #   verified basis as train.sbatch: partition NORMAL has MaxTime=14-00:00:00
 #   and QOS `stud` sets no MaxWall, and the practical-student cap does not
-#   apply to this account. A ceiling, not an estimate -- early stopping
+#   apply to this account. A ceiling, not an estimate; early stopping
 #   (patience 8) is expected to end the run well before it.
 #SBATCH --mail-type=END,FAIL
 #SBATCH --output=/storage/slurm/logs/slurm-%j.out
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# XR Hand Detection (DetNet) Training Job — working-code checkout
+# XR Hand Detection (DetNet) Training Job: working-code checkout
 # No AD4_ENABLEGUI flag: detection has no visualizer/GUI path at all
 # (per DETECTION_PIPELINE.md). wandb controlled via WANDB_API_KEY/WANDB_MODE.
 # ---------------------------------------------------------------------------
@@ -52,17 +52,17 @@ export AD4_LOADFAST=0
 # Set WANDB_API_KEY in ~/.bashrc, or run `wandb login` once interactively.
 # export WANDB_MODE=disabled   # uncomment to disable wandb instead
 
-# Confirmed clone location (2026-07-20) — matches train.sbatch.
+# Confirmed clone location (2026-07-20); matches train.sbatch.
 REPO_ROOT="/storage/user/praa/working_code_mercury_train/hand-tracking-playground/mercury_train"
 SCRIPT_DIR="$REPO_ROOT/py/training/detection"
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
-# 1. local_config.py — cp local_config_cluster.py over it, then fill in the
-#    REPLACE_ME paths (HMDHandRects/EgoHands/EpicKitchens) — nobody has
+# 1. local_config.py: cp local_config_cluster.py over it, then fill in the
+#    REPLACE_ME paths (HMDHandRects/EgoHands/EpicKitchens); nobody has
 #    confirmed these locations on the cluster yet, unlike the keypoint data.
-# 2. Split pre-flight — same as train.sbatch:
+# 2. Split pre-flight: same as train.sbatch:
 #      python py/training/common/hot3d_split.py <hot3d_dataset_root>
 #    trainer_detection.py trains on train_mixed and validates on a carve-out
 #    from it; it holds no test set. Test scoring is eval_detnet.py's job.

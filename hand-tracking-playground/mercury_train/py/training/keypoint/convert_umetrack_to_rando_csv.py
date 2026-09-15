@@ -1,118 +1,10 @@
 """
-Convert Meta's UmeTrack / HOT3D hand-tracking-challenge data (loaded via
-facebookresearch/hand_tracking_toolkit) into the flat CSV + image-folder
-format that RandoData.py's RandoDataset already knows how to read.
-
-WHY THIS SHAPE OF CONVERTER
-----------------------------
-mercury_train already has an established pattern for plugging in "real"
-(non-Blender) hand datasets: RandoDataset reads a space-delimited CSV
-(filename, 21 3D keypoints, per-keypoint validity flags, is_right, optional
-mask filename) plus a folder of grayscale crop images, and feeds them
-through the same AugmentationMaker used by ArtificialDataset. Panoptic,
-FreiHand, Tom OpenHands and "nikitha" are already wired in this way (see
-CombinedDataset.py / KEYPOINT_PIPELINE.md, which explicitly calls out
-"Future work: replace Tom with HOT3D or UmeTrack").
-
-We deliberately do NOT try to shoehorn UmeTrack through the synthetic
-ArtificialData.py / camera_info.csv / hand_poses.csv path. That path
-expects a full 26-joint rig (position + orientation per bone, matching
-this project's own Blender armature convention) produced by procedural
-generation, and reprojects it with a from-scratch pinhole camera via the
-`ad4_stereographic_projection` pybind module. Real motion-capture datasets
-don't give you rig-space bone orientations for an arbitrary third-party
-skeleton -- you'd need to solve a full retargeting problem (map UmeTrack's
-own kinematic tree onto this project's rig, bone-length and axis
-differences included) which cannot be verified without the dataset, a
-working Blender + pybind build, and a lot of visual debugging. Reusing
-RandoDataset instead means: no new loader code path, no retargeting, and
-it slots into CombinedDataset.py's existing weighting/held-out-split logic
-for free.
-
-WHAT UMETRACK ACTUALLY GIVES US
---------------------------------
-hand_tracking_toolkit's `build_hand_dataset(..., output_crops=True,
-crop_size=128)` already does the hard part: it returns, per hand per
-frame, a 128x128 image warped by a synthetic "crop camera" that's already
-pointed at and centered on that hand (see hand_tracking_toolkit/
-dataset.py: SampleDecoder / make_hand_crops / decode_hand_crop_params).
-That crop camera is a `PinholePlaneCameraModel` with no lens distortion,
-in the coordinate frame in which the hand's ground-truth pose is also
-expressed. This means:
-
-  1. We do not need to do any of our own reprojection math or camera
-     placement -- their crop camera already solved that (this is the same
-     "look at the hand" problem our Blender miniball-based camera placement
-     solves for synthetic data).
-  2. Ground truth keypoints are obtained by running UmeTrack forward
-     kinematics (`umetrack_hand_model.forward_kinematics`) on the
-     per-frame `joint_angles` + `wrist_xform`, using the per-sequence
-     `hand_shape.umetrack` bone lengths, then projecting the resulting
-     world-space landmarks through the crop camera with `world_to_window3`
-     (returns pixel x, pixel y, and camera-space depth in one call).
-
-RESOLVED CAVEATS
-----------------
-- Landmark order: RESOLVED, no longer a guess. `forward_kinematics` returns
-  20 landmarks in the hand model's own native order, which the toolkit
-  source does not document beyond "canonical landmark mapping" -- but
-  `diagnose_umetrack_landmark_order.py` derives it directly from the
-  downloaded model's actual skeleton (joint_parent/first_child/
-  next_sibling tree + rest-pose geometry), not from images or assumption.
-  Findings, verified against subject_000_separate_hand_000000: the thumb
-  chain is a clear geometric outlier (39.9 degrees off the mean finger
-  direction vs. 4.7-15.4 degrees for the rest); the other four chains fall
-  into a monotonic line matching real index/middle/ring/pinky anatomy.
-  Landmarks 0-4 are the five fingertips (thumb/index/middle/ring/pinky, in
-  that order -- confirmed by each being the farthest landmark from its
-  finger's root when sorted by rest-pose distance); landmarks 5-19 are
-  each finger's remaining mcp/pip/dip, in consecutive blocks of 3, nearest
-  to root first. See `_UMETRACK_LANDMARK_PERMUTATION` below for the exact
-  mapping this produced. If this is ever run against a *different*
-  UmeTrack/HOT3D hand model file, re-run the diagnostic first rather than
-  assuming the same permutation holds -- nothing guarantees every subject's
-  model file uses an identical raw landmark order, only that it's fully
-  derivable the same way.
-- Multiple camera streams: each UmeTrack frame has 2-4 synchronized
-  monochrome streams (plus optional RGB). This script only takes the
-  first available stream per crop to keep the first version simple; using
-  every stream would multiply the amount of usable training data for
-  free, and is a natural follow-up once this path is confirmed to work.
-- has_depth / 3D supervision: unlike Panoptic/FreiHand/Tom (2D-only, per
-  KEYPOINT_PIPELINE.md), UmeTrack is a proper mocap dataset, so we *do*
-  have accurate depth. RandoDataset's `do_one_augmentation` infers
-  `has_depth` purely from whether the keypoints array passed in is shape
-  (21,3) or (21,2) -- but note RandoDataset's own `rotate_hand` helper
-  currently discards the 3rd (depth) column before calling
-  `do_one_augmentation` (see RandoData.py's `crop`/`rotate_hand`, which
-  hardcode `np.zeros((21,2))`). That means today, depth from this
-  converter would be silently dropped unless RandoData.py is also updated
-  to preserve it -- flagged here rather than silently "fixed" as part of
-  this converter, since that's a behavior change to code this converter
-  doesn't own.
-
-LICENSING
----------
-See UMETRACK_LICENSE_NOTES.md next to this script before running it on
-real downloaded data.
-
-USAGE
------
-    pip install --break-system-packages git+https://github.com/facebookresearch/hand_tracking_toolkit
-    pip install --break-system-packages webdataset opencv-python
-
-    python convert_umetrack_to_rando_csv.py \
-        --root /path/to/downloaded/umetrack/train \
-        --sequences subject_000_separate_hand_000000 subject_000_hand_hand_000001 \
-        --out-dir /media/moses/traindata-jakob/keypoint_real_data/munge_april26 \
-        --out-name umetrack
-
-This writes:
-    {out-dir}/{out-name}/*.jpg          (128x128 grayscale crops)
-    {out-dir}/{out-name}.csv            (RandoDataset-compatible CSV)
-
-Then add one line to CombinedDataset.py (see bottom of this file for the
-exact snippet) to fold it into training.
+Converts Meta's UmeTrack / HOT3D data into the flat CSV plus image folder that
+RandoData.py already reads, so no new loader path is needed. build_hand_dataset
+with output_crops=True already gives a 128x128 crop per hand through a
+distortion-free crop camera in the same frame as the pose, so no reprojection
+happens here. Superseded by HOT3DKeypointDataset for the thesis. Note that
+RandoData's rotate_hand() drops the depth column, so depth from here is lost.
 """
 
 import argparse
@@ -123,37 +15,16 @@ import cv2
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Landmark order mapping. VERIFIED against real downloaded data (subject_000
-# _separate_hand_000000) via diagnose_umetrack_landmark_order.py -- NOT a
-# guess. That script walked the actual skeleton tree (joint_parent /
-# joint_first_child / joint_next_sibling) to find the 5 real finger chains,
-# used rest-pose root-direction angular deviation to identify the thumb
-# unambiguously (39.9 degrees off the mean finger direction, vs 4.7-15.4
-# degrees for the other four -- a clear outlier), and used nearest rest-pose
-# 3D distance to assign each of the 20 canonical landmarks to a finger.
-#
-# The real layout is NOT simple contiguous blocks (thumb=0-3, index=4-7,
-# ...) as originally assumed. It's: landmarks 0-4 are the five fingertips
-# (thumb, index, middle, ring, pinky tip, in that order -- confirmed by
-# each being the farthest landmark from its finger's root in the sort),
-# and landmarks 5-19 are each finger's remaining 3 joints (mcp, pip, dip,
-# nearest-to-root first), grouped in consecutive blocks of 3 in the same
-# finger order:
-#   thumb  = landmarks [mcp=5,  pip=6,  dip=7,  tip=0]
-#   index  = landmarks [mcp=8,  pip=9,  dip=10, tip=1]
-#   middle = landmarks [mcp=11, pip=12, dip=13, tip=2]
-#   ring   = landmarks [mcp=14, pip=15, dip=16, tip=3]
-#   pinky  = landmarks [mcp=17, pip=18, dip=19, tip=4]
-# ---------------------------------------------------------------------------
+# --- Landmark order mapping ------------------------------------------------
+# VERIFIED against subject_000_separate_hand_000000, not guessed from the layout.
+# Thumb found by rest-pose angular deviation, 39.9 deg against 4.7-15.4 for the rest.
+# Landmarks 0-4 are the fingertips; 5-19 are mcp/pip/dip per finger:
+#   thumb 5,6,7,0   index 8,9,10,1   middle 11,12,13,2   ring 14,15,16,3   pinky 17,18,19,4
 NUM_UMETRACK_LANDMARKS = 20
 NUM_PROJECT_KEYPOINTS = 21  # wrist + 4 joints x 5 fingers, per ArtificialData._25_to_21
 
-# Index into the raw 20-landmark array, per project keypoint slot 1-20
-# (slot 0 is the wrist, filled separately from wrist_world_pos). Ordered
-# mcp/pip/dip/tip per finger, fingers in thumb/index/middle/ring/pinky
-# order -- matches this project's universal 21-keypoint convention (same
-# structure ArtificialData._25_to_21 produces for synthetic data).
+# Raw 20-landmark index per project slot 1-20; slot 0 is the wrist, filled separately.
+# mcp/pip/dip/tip per finger, thumb to pinky, as ArtificialData._25_to_21 produces.
 _UMETRACK_LANDMARK_PERMUTATION = [
     5, 6, 7, 0,      # thumb: mcp, pip, dip, tip
     8, 9, 10, 1,     # index: mcp, pip, dip, tip
@@ -205,16 +76,15 @@ def build_rando_csv_row(
 
         is_right = bool(b[acc_idx]); acc_idx += 1
 
-        # optional trailing mask filename column, only if present, is not
-        # written by this converter (UmeTrack crops have no matting mask).
+        # The optional trailing mask column isn't written; UmeTrack crops have no mask.
 
     So per row: 1 (filename) + 22*3 (kps) + 22*3 (validity, 3 cols/joint even
     though only 2 of the 3 are actually read) + 1 (is_right) = 134 fields.
-    (Verified against RandoDataset's actual parsing logic -- see the
-    round-trip test in verify_umetrack_csv_format.py next to this script.)
+    (Verified against RandoDataset's actual parsing logic with a
+    round-trip test.)
 
     We only have real values for the project's 21 keypoints; row/joint 21
-    (the "22nd" slot) is written as zeros -- RandoDataset's own
+    (the "22nd" slot) is written as zeros, RandoDataset's own
     `rotate_hand` helper only ever looks at the first 21 rows of `kps`
     anyway (hardcoded `np.zeros((21, 2))` / `range(21)`), so slot 21 is
     dead weight kept only to match the column count of the existing
@@ -231,10 +101,7 @@ def build_rando_csv_row(
         for j in range(3):
             fields.append(f"{kps22[i, j]:.6f}")
 
-    # Validity columns: UmeTrack ground truth comes from a mocap rig and is
-    # considered fully valid for every real joint; the padding 22nd joint
-    # (unused downstream) is marked invalid for honesty even though nothing
-    # currently reads it.
+    # Mocap GT, so every real joint is valid; the padding 22nd is marked invalid.
     for i in range(22):
         valid = 1.0 if i < 21 else 0.0
         fields.append(f"{valid:.1f}")  # gt_xy_valid[i]
@@ -255,8 +122,7 @@ CSV_HEADER = " ".join(
 
 
 def convert(root: str, sequence_names: list, out_dir: str, out_name: str, max_frames: int = None):
-    # Deferred import: these are third-party packages the user needs to
-    # install separately (see module docstring), not part of this repo.
+    # Deferred import: third-party packages installed separately, see module docstring.
     from hand_tracking_toolkit.dataset import build_hand_dataset
     from hand_tracking_toolkit.dataset import HandSide
     from hand_tracking_toolkit.hand_models.umetrack_hand_model import forward_kinematics
@@ -281,8 +147,7 @@ def convert(root: str, sequence_names: list, out_dir: str, out_name: str, max_fr
         csv_file.write(CSV_HEADER + "\n")
 
         for sample_crops in dataset:
-            # output_crops=True makes each dataset item a *list* of
-            # HandCropData, one per hand visible in that frame (0, 1, or 2).
+            # output_crops=True makes each item a list of HandCropData, one per visible hand.
             for crop in sample_crops:
                 if crop.hand_pose is None or crop.hand_pose.umetrack is None:
                     n_skipped_no_pose += 1

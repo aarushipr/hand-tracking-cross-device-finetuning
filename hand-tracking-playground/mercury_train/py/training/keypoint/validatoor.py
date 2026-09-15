@@ -45,16 +45,8 @@ def validation_loop_just_one(
             has_depth = doct['has_depth'].to(device)
             gt_is_hand = doct['is_hand'].to(device)
 
-            # Apply the same masking as the training loop so validation loss
-            # is comparable. has_depth is 0 for datasets without depth labels —
-            # without this mask, those samples would incorrectly penalise the
-            # model on their zero-depth ground truth values.
-            #
-            # Per-joint validity (see HOT3DKeypointDataset._project_hand): a
-            # hand can have some joints usable and others not, so xy and
-            # depth get masked per joint, matching kpest_trainer.py's
-            # train_batch exactly so train and validation loss stay
-            # comparable.
+            # Same masking as the training loop so validation loss is comparable.
+            # has_depth=0 samples would otherwise be penalised on zero-depth ground truth.
             depth_valid_per_joint = doct['depth_valid_per_joint'].to(device)
             has_depth_expanded = (depth_valid_per_joint * gt_is_hand[:, None])[:, :, None]
 

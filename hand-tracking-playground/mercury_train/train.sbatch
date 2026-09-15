@@ -22,7 +22,7 @@
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# XR Hand Tracking (KeyNet) Training Job — working-code checkout
+# XR Hand Tracking (KeyNet) Training Job, working-code checkout
 # Modeled on the root mercury_train repo's train.sbatch, repointed at
 # working-code's own clone location on the cluster.
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ export AD4_ENABLEWANDB=1
 # Set to 1 for a quick smoke test: 2 training and 1 validation HOT3D
 # sequence, writing to checkpoints_loadfast/ so it cannot contaminate a real
 # run's checkpoints. (This used to refer to ArtificialData.py's 25-sequence
-# cap; that data source is no longer used -- training is HOT3D-only.)
+# cap; that data source is no longer used; training is HOT3D-only.)
 export AD4_LOADFAST=0
 
 # Confirmed clone location (2026-07-20): includes the
@@ -68,23 +68,23 @@ SCRIPT_DIR="$REPO_ROOT/py/training/keypoint"
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
-# 1. wandb login — run once interactively before submitting (or set
+# 1. wandb login; run once interactively before submitting (or set
 #    WANDB_API_KEY in ~/.bashrc).
-# 2. local_config.py — copy local_config_cluster.py over it and adjust paths
+# 2. local_config.py, copy local_config_cluster.py over it and adjust paths
 #    if your data isn't at /storage/user/praa/synth_hands_output:
 #      cp py/training/keypoint/local_config_cluster.py py/training/keypoint/local_config.py
 #    REQUIRED after 2026-09-02: the HOT3D dataset key was renamed
 #    hot3d_dataset_path -> hot3d_dataset_root so both trainers use one name.
 #    An old local_config.py will fail with AttributeError until re-copied.
-# 4. Split pre-flight — confirm the participant assignment and per-device
+# 4. Split pre-flight, confirm the participant assignment and per-device
 #    train share before committing a run to it:
 #      python py/training/common/hot3d_split.py <hot3d_dataset_root>
-# 5. Quest keypoint check — the mixed split puts Quest recordings into
-#    KeyNet's training set for the first time. Confirm they load:
+# 5. Quest keypoint check. The mixed split puts Quest recordings into KeyNet's
+#    training set for the first time, so confirm they load:
 #      python py/evaluation/check_quest_keypoints.py <a Quest sequence dir>
 #      python py/evaluation/check_quest_keypoints.py <an Aria sequence dir>
 #    Compare the two; Aria is the control.
-# 3. C++ extension — must be rebuilt fresh on the cluster before first run:
+# 3. C++ extension; must be rebuilt fresh on the cluster before first run:
 #      rm -rf build/ && python setup.py install --user
 # ---------------------------------------------------------------------------
 

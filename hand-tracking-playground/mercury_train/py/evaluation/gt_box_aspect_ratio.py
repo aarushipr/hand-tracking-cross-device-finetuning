@@ -1,31 +1,9 @@
 """
-gt_box_aspect_ratio.py -- how much IoU can DetNet reach in principle?
-
-DetNet emits a single `size` value per hand slot, so every box it can produce is
-a SQUARE. HOT3D's ground-truth boxes are rectangles: eval_detnet.py builds
-gt["box_upright"] from the min/max of the rotated corners with no squaring, and
-box_iou compares a square prediction against that rectangle.
-
-For a ground-truth box of aspect ratio r = long/short, the best IoU any square
-can achieve, at the optimal side length sqrt(w*h), is
-
-    IoU_max = 1 / (2*sqrt(r) - 1)
-
-which is 1.000 at r=1, 0.547 at r=2 and 0.406 at r=3. This script measures the
-actual distribution of r across the evaluation split and reports the resulting
-per-box ceiling, so Chapter 6 can say whether DetNet's near-zero rate at
-IoU >= 0.75 reflects a training shortfall or an architectural bound.
-
-The ceiling is an upper bound and assumes a perfectly centred, optimally sized
-square. Real predictions also carry centring error, so measured IoU will sit
-below it.
-
-Reads nothing but HOT3D and modifies no existing code. Ground-truth boxes are
-constructed by eval_sam3_boxes.raw_sample, which reproduces
-HOT3DVRSDetectionDataset.__getitem__ exactly, including the Section 4.2 margin.
-
-Usage:
-  python py/evaluation/gt_box_aspect_ratio.py --split test_mixed --limit 2000
+How much IoU can DetNet reach in principle? Its single `size` output makes every
+prediction square, while HOT3D's ground truth is rectangular. For aspect ratio r
+the best a square can do is 1 / (2*sqrt(r) - 1): 0.547 at r=2, 0.406 at r=3. This
+measures r across the split so Chapter 6 can say whether the near-zero rate at
+IoU >= 0.75 is a training shortfall or an architectural bound.
 """
 
 import argparse

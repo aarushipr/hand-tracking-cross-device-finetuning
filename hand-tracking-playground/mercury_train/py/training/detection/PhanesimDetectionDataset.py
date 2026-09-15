@@ -1,50 +1,10 @@
 """
-PhanesimDetectionDataset -- loads Phanesim's synthetic hand-detection data
-(per-frame 2D box + presence, from hand_rect.csv) for DetNet's second
-fine-tuning phase, on top of the HOT3D fine-tuning already done.
-
-Phanesim was built by wany (another student of the same supervisor) with a
-Blender-based renderer at /home/stud/wany/phanesim/. Two batches were mirrored
-to /storage/group/dataset_mirrors/01_incoming/phanesim20260908/ and copied
-into /storage/user/praa/phanesim_dataset/ as `dataset` (3601 clips) and
-`dataset2` (1400 clips); pass both roots in to pool them.
-
-Why this dataset only needs hand_rect.csv, unlike HOT3DVRSDetectionDataset
-(which projects 3D joints through a camera pose): Phanesim already ships a
-ready-made 2D box per frame, so no camera geometry is needed here at all.
-That also means this loader is unaffected by the still-open question of how
-to recover per-frame camera pose for KeyNet's depth target (see
-PhanesimKeypointDataset.py) -- detection only ever needed pixel coordinates,
-which we already have directly.
-
-Verified against real data before writing this (see thesis-work chat log,
-2026-09-08):
-  - Box convention: (x, y) is the TOP-LEFT corner, not the center -- cross-
-    checked against joints_2d.csv's pixel ranges for the same frame, and
-    later confirmed visually by drawing the box on frame_000002.png of
-    dataset/clip_00000 (both the left- and right-hand boxes wrap the visible
-    hand tightly, including a right-hand box that correctly captured a
-    single finger clipped by the frame edge).
-  - Orientation: dataset/clip_00000 frame 0 and dataset2/clip_00000 frame 0
-    both render upright (vertical walls/trees, no cocked horizon), unlike
-    HOT3D's raw device frames which need preprocess_baseline.rotate_upright.
-    Hence orientation=0 by default here, not per-device 270.
-  - Margin: the drawn boxes show visible padding beyond the hand silhouette,
-    not a pixel-tight box -- so no additional margin is applied by default
-    (margin=0.0). If a future check finds the boxes too tight after all,
-    pass margin > 0.
-  - Left/right: hand_rect.csv has separate left_/right_ prefixed columns, so
-    handedness is unambiguous here (unlike HOT3DVRSDetectionDataset's
-    hand_index 0/1 assumption for HOT3D).
-
-Confirmed working end to end on the cluster 2026-09-09: 50185 samples loaded
-across both roots, sample contents (160x160 crop, exists/center/size all in
-sane ranges) look correct.
-
-NOT yet verified, flag if wrong: whether every clip in both `dataset` and
-`dataset2` shares the same camera intrinsics/orientation as clip_00000 --
-only a handful of clips were spot-checked. If a future fine-tuning run's
-loss looks wrong, re-check a few frames from clips other than clip_00000.
+Loads Phanesim's synthetic detection data (2D box plus presence from
+hand_rect.csv) for DetNet's phase 2, on top of the HOT3D fine-tuning. Built by
+wany; two roots, `dataset` and `dataset2`, pooled by passing both. Checked against
+real data: (x, y) is the top-left corner, frames are already upright so
+orientation defaults to 0, boxes already carry padding so margin defaults to 0,
+and left_/right_ columns make handedness unambiguous.
 """
 
 import csv
@@ -67,7 +27,7 @@ def discover_clip_dirs(dataset_roots: list) -> list:
     _done.json and cam_head0/hand_rect.csv. Factored out of __init__ so
     callers that need to split by CLIP rather than by frame (e.g. carving
     out a validation set without letting near-duplicate frames from the
-    same clip leak across the split -- see trainer_detection_phanesim.py)
+    same clip leak across the split; see trainer_detection_phanesim.py)
     use the exact same filtering the dataset itself does, rather than a
     second copy that could quietly drift out of sync.
     """
@@ -84,9 +44,9 @@ def discover_clip_dirs(dataset_roots: list) -> list:
 class PhanesimDetectionDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_roots: list = None, clip_dirs: list = None,
                  orientation: int = 0, margin: float = 0.0, augment: bool = True):
-        """Either pass dataset_roots (globs every clip_* under each root --
+        """Either pass dataset_roots (globs every clip_* under each root;
         the normal case) or clip_dirs (an explicit, already-filtered list
-        of clip directories -- used by trainer_detection_phanesim.py to
+        of clip directories, used by trainer_detection_phanesim.py to
         build separate train/val datasets from a single clip-level split).
         """
         if clip_dirs is None:
@@ -127,10 +87,7 @@ class PhanesimDetectionDataset(torch.utils.data.Dataset):
 
         image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         if image is None:
-            # Mirrors SyntheticDetectionDataset's resilience approach -- one
-            # bad frame shouldn't kill an unattended multi-hour job, but too
-            # many in a row means something systemic (bad path, corrupt
-            # mirror) rather than one-off.
+            # One bad frame shouldn't kill a long job, but many in a row means something systemic.
             print(f"[PhanesimDetectionDataset] WARNING: failed to load "
                   f"{img_path}. Substituting a random sample.")
             if retries_left <= 0:
@@ -147,10 +104,7 @@ class PhanesimDetectionDataset(torch.utils.data.Dataset):
         with open(rect_path) as f:
             row = list(csv.DictReader(f))[frame_idx]
 
-        # Slot 0 = left, slot 1 = right -- matches KeyNet's JOINT_NAMES-style
-        # convention and, unlike HOT3D, is unambiguous here since
-        # hand_rect.csv names left_/right_ explicitly rather than an
-        # untyped hand index.
+        # Slot 0 left, 1 right; unambiguous here since hand_rect.csv names left_/right_.
         bbox_list = [None, None]
         for slot, prefix in ((0, "left"), (1, "right")):
             if row.get(f"{prefix}_present") != "1":

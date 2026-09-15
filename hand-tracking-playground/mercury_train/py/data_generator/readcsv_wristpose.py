@@ -21,8 +21,7 @@ def get_pos(file, frame_idx: int, elbow: bool = False):
         # Size of a vec3+quaternion
         root += 7
 
-    # pandas >=2.0 dropped positional fallback for integer keys on a
-    # string-indexed Series (KeyError instead) -- must use .iloc.
+    # pandas >=2.0 dropped positional fallback on a string-indexed Series; must use .iloc.
     p = mathutils.Vector((arr.iloc[root], arr.iloc[root + 1], arr.iloc[root + 2]))
 
     q = mathutils.Quaternion()

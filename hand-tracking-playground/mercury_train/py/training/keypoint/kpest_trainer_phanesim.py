@@ -1,30 +1,9 @@
 """
-kpest_trainer_phanesim.py -- KeyNet fine-tuning PHASE 2: continues training
-from the phase-1 HOT3D fine-tuned checkpoint (checkpoints_train_mixed/
-checkpoint_best.pth) using Phanesim's synthetic data instead of HOT3D.
-Mirrors trainer_detection_phanesim.py's own rationale (see that file):
-kept separate from kpest_trainer.py so phase 1 stays reproducible
-unchanged and can never be overwritten by this phase's checkpoints, and
-should be run as a time-boxed TRIAL first -- re-run eval_keynet.py against
-test_mixed on this phase's checkpoint_best.pth and compare against the
-phase-1 numbers before committing to a full run. Same catastrophic-
-forgetting risk applies (Phanesim only, no HOT3D mixed back in, both
-`dataset` and `dataset2` pooled -- 2026-09-08 decision).
-
-Depth is invalid for every Phanesim sample (see PhanesimKeypointDataset.py)
--- settings.py already sets depth_loss_mul/elbow_loss_mul/curls_loss_mul so
-that only has_depth (never separately toggled here) gates those terms, and
-existence_loss_mul is already 0, matching phase 1's own scope decision. So
-this phase's loss is effectively xy-only, same as phase 1's HOT3D loss
-already effectively was, for the same reasons.
-
-Reuses train_loop/save_checkpoint/set_train_mode/MAX_EPOCHS/
-EARLY_STOPPING_PATIENCE from kpest_trainer.py, and validatoor.validation_loop
-directly, unchanged -- none of them are HOT3D-specific, and
-PhanesimKeypointDataset's __getitem__ produces the exact same batch dict
-shape kpest_trainer.py's train_loop already expects, so there is no reason
-to fork that logic and risk the two phases silently diverging in how loss
-is computed.
+KeyNet fine-tuning phase 2: continues from the phase-1 HOT3D checkpoint on
+Phanesim's synthetic data. Mirrors trainer_detection_phanesim.py, which carries
+the shared reasoning, including the catastrophic-forgetting risk and running it
+time-boxed first. Depth is invalid for every Phanesim sample, so this phase's loss
+is effectively xy-only, as phase 1's already was.
 """
 
 import multiprocessing
@@ -53,16 +32,10 @@ from PhanesimKeypointDataset import PhanesimKeypointDataset, discover_clip_dirs
 
 mse = nn.MSELoss(reduction='mean')
 
-# Every 20th clip (~5%) held out for validation, interleaved across the full
-# combined clip list -- same reasoning and stride as
-# trainer_detection_phanesim.py's VAL_CLIP_STRIDE (dataset_roots is
-# [dataset, dataset2]; a tail-slice would put nearly all validation inside
-# whichever root is listed last).
+# Every 20th clip held out, interleaved: a tail slice would land in one root only.
 VAL_CLIP_STRIDE = 20
 
-# Phase-1 checkpoint this phase continues from. Relative to this script's
-# own directory, matching kpest_trainer.py's own checkpoint_dir convention
-# (checkpoints_{TRAIN_SPLIT}, TRAIN_SPLIT="train_mixed").
+# Phase-1 checkpoint to continue from, relative to this script's directory.
 PHASE1_CHECKPOINT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "checkpoints_train_mixed", "checkpoint_best.pth")
@@ -73,7 +46,7 @@ CHECKPOINT_DIRNAME = "checkpoints_phanesim_phase2"
 def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     num_devices = 1
-    batch_size_per_device = 64  # Same as kpest_trainer.py's own -- identical
+    batch_size_per_device = 64  # Same as kpest_trainer.py's own, identical
                                  # architecture/crop size, same OOM ceiling.
     if device.type == "cuda":
         num_devices = torch.cuda.device_count()
@@ -85,12 +58,7 @@ def main():
     else:
         wandb.init(project="keypoint_estimator_training", mode="disabled")
 
-    # PhanesimKeypointDataset holds no live providers (plain CSV + PNG
-    # reads, unlike HOT3DKeypointDataset's VRS providers), so unlike
-    # kpest_trainer.py's num_workers cap of 4 -- which exists specifically
-    # because of VRS file-handle sharing across forked workers -- there is
-    # no equivalent concern here. Uncapped, matching
-    # trainer_detection_phanesim.py's own num_workers for the same reason.
+    # Uncapped: PhanesimKeypointDataset reads CSV+PNG, with no VRS providers to share.
     num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", multiprocessing.cpu_count()))
 
     roots = getattr(local_config, "phanesim_dataset_roots", None)
@@ -108,9 +76,7 @@ def main():
     val_clip_set = set(val_clips)
     train_clips = [c for c in all_clips if c not in val_clip_set]
 
-    # loadfast is a smoke test -- mirrors kpest_trainer.py's own loadfast
-    # slicing (train_dirs[:2] / val_dirs[:1]) and
-    # trainer_detection_phanesim.py's AD4_LOADFAST path.
+    # loadfast is a smoke test, mirroring kpest_trainer.py's own slicing.
     loadfast = header.env_settings.loadfast
     if loadfast:
         train_clips = train_clips[:2]
@@ -120,23 +86,11 @@ def main():
           f"{len(val_clips)} val clips (stride={VAL_CLIP_STRIDE}) from "
           f"{len(all_clips)} total" + (" [LOADFAST]" if loadfast else ""))
 
-    # eval_mode=False for BOTH loaders -- matches kpest_trainer.py's own
-    # make_hot3d_loader, which never passes eval_mode=True either. eval_mode
-    # is only for eval_keynet.py's standalone deterministic evaluation, not
-    # for validation during training.
+    # eval_mode=False for both; eval_mode is only for eval_keynet.py's standalone run.
     train_dataset = PhanesimKeypointDataset(clip_dirs=train_clips, eval_mode=False)
     val_dataset = PhanesimKeypointDataset(clip_dirs=val_clips, eval_mode=False)
 
-    # drop_last=False, NOT kpest_trainer.py's own drop_last=True for its
-    # train loader -- with loadfast's 2-clip slice (each phanesim clip is
-    # only ~15 frames), the whole train set can be smaller than one batch,
-    # so drop_last=True would drop every batch, leaving train_loop's
-    # for-loop over dataloader_train with zero iterations and
-    # `total_loss / loss_divisor` a literal division by zero. Confirmed
-    # 2026-09-09 (job 1700699). trainer_detection_phanesim.py's loader
-    # already avoided this same trap the same way; applying it here too.
-    # Harmless for the real run: at most one smaller-than-usual batch per
-    # epoch out of thousands.
+    # drop_last=False: under loadfast the train set can be under one batch (job 1700699).
     dataloader_train = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, persistent_workers=num_workers > 0,
@@ -154,25 +108,10 @@ def main():
             f"first (or check the path) before running this.")
 
     model = KeyNet.KeyNet()
-    # load_keynet_weights() must run BEFORE the phase-1 state_dict is loaded
-    # below, even though its weight VALUES get overwritten immediately
-    # after -- same reason as trainer_detection_phanesim.py's
-    # load_detnet_weights() call: load_weights.py's load_conv_bn()
-    # dynamically ATTACHES .bias Parameters to image_network/fused_network/
-    # network_2d_px_coord conv layers that InvertedResidual builds with
-    # bias=False. A bare KeyNet.KeyNet() therefore has fewer parameters
-    # than the phase-1 checkpoint (saved after phase 1's kpest_trainer.py
-    # did exactly this), so load_state_dict(strict=True) would fail with
-    # "Unexpected key(s)" on every dynamically-added bias -- this exact bug
-    # was caught and fixed for DetNet's phase 2 on 2026-09-09 before it
-    # reached a real job; applying that fix here up front rather than
-    # rediscovering it.
+    # load_keynet_weights() first: it attaches the .bias params a strict load needs.
     load_keynet_weights(model)
 
-    # Same image_network-frozen setup as phase 1 -- only the rest of the
-    # network continues training, keeping the two phases methodologically
-    # consistent. Frozen BEFORE DataParallel wrapping, matching
-    # kpest_trainer.py's own ordering.
+    # Same image_network-frozen setup as phase 1, frozen before DataParallel wrapping.
     for param in model.image_network.parameters():
         param.requires_grad = False
 
@@ -188,26 +127,17 @@ def main():
     trainable_params = (p for p in model.module.parameters() if p.requires_grad)
     optimizer = torch.optim.AdamW(trainable_params)
 
-    # Deliberately NOT resuming epoch/optimizer state from the phase-1
-    # checkpoint -- this is a new training phase on a different data
-    # source, not a continuation of the same run. Same as
-    # trainer_detection_phanesim.py.
+    # Deliberately not resuming epoch/optimizer state: a new phase, not a continuation.
     start_epoch = 0
     best_validation_loss = float('inf')
 
-    # A distinct name from kpest_trainer.py's own "checkpoints_loadfast" --
-    # NOT cosmetic. This exact bug (silent stale-checkpoint resume, zero
-    # real training steps, still logging a success-looking message) already
-    # happened once for DetNet's phase 2 and is called out by name in
-    # kpest_trainer.py's own checkpoint_dir comment as a known prior
-    # incident for THIS file specifically. Applying the fix up front here.
+    # Distinct from kpest_trainer.py's "checkpoints_loadfast"; sharing it caused a stale resume.
     checkpoint_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "checkpoints_loadfast_phanesim" if loadfast else CHECKPOINT_DIRNAME)
     checkpoint_file = os.path.join(checkpoint_dir, 'checkpoint.pth')
 
-    # Still allow resuming THIS phase's own training if it gets preempted
-    # partway through -- same pattern as kpest_trainer.py.
+    # Still allow resuming this phase if it gets preempted partway through.
     if os.path.exists(checkpoint_file):
         checkpoint = torch.load(checkpoint_file, map_location=device, weights_only=False)
         if 'best_validation_loss' in checkpoint:
@@ -224,7 +154,7 @@ def main():
 
     epochs_without_improvement = 0
 
-    # Hard cap at 2 epochs under loadfast regardless of early stopping --
+    # Hard cap at 2 epochs under loadfast regardless of early stopping,
     # same reasoning as trainer_detection_phanesim.py's effective_max_epochs:
     # with only 2-3 tiny clips, validation loss could plausibly keep
     # "improving" by noise alone for longer than EARLY_STOPPING_PATIENCE=8

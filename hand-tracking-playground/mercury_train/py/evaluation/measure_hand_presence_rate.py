@@ -1,47 +1,8 @@
 """
-What fraction of DetNet's candidate frames in train_mixed / test_mixed
-contain no hand at all?
-
-WHY THIS EXISTS
----------------
-Your supervisor asked whether the detection dataset includes negative
-frames (no hand present) so DetNet learns "sometimes there's nothing
-here", and if so what fraction that is. HOT3DVRSDetectionDataset's own
-docstring confirms these negatives exist by construction -- the sample
-index walks every timestamp of every camera stream, not just the
-timestamps present in box2d_hands.csv -- but the actual percentage isn't
-computed or logged anywhere. This script measures it directly.
-
-DEFINITION
-----------
-Same sampling this project's own DetNet trainer uses: train_mixed /
-test_mixed sequences, frame_stride=5 (HOT3D_FRAME_STRIDE in
-trainer_detection.py), min_visibility_ratio=0.2 (the class default,
-which trainer_detection.py doesn't override). For each sampled frame,
-a hand counts as present if box2d_hands.csv has a non-null box with a
-non-null visibility_ratio >= 0.2 for that hand at that timestamp --
-exactly the check HOT3DVRSDetectionDataset.__getitem__ applies before
-setting exists[slot]=1. A frame is a "no hand" frame when neither hand
-clears that bar.
-
-WHY THIS IS FAST DESPITE HOT3D'S I/O BEING SLOW
-------------------------------------------------
-Training is I/O-bound because every sample decodes a full VRS image
-frame over network storage. This script never calls get_image() --
-it only resolves stream IDs and queries box2d_hands.csv-backed
-providers, both of which are small in-memory lookups once a
-sequence's providers are open. Opening those providers still touches
-each sequence's .vrs once (to list stream IDs), so this isn't free,
-but it's a per-sequence cost (~294 sequences total) instead of a
-per-frame one.
-
-USAGE
------
-    python py/evaluation/measure_hand_presence_rate.py
-
-Builds the same frame_stride=5 index the real DetNet trainer used
-(reusing its on-disk cache at hot3d_index_cache_dir if warm), then
-scans train_mixed's and test_mixed's sequence pools.
+What fraction of DetNet's candidate frames in train_mixed / test_mixed contain no
+hand at all? The negatives exist by construction, since the index walks every
+timestamp rather than only those in box2d_hands.csv, but the percentage is logged
+nowhere. Same sampling as the trainer: stride 5, visibility >= 0.2.
 """
 import os
 import sys

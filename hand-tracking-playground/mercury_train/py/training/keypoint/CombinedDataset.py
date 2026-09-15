@@ -22,18 +22,9 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             amts.append(am)
             datasets.append(ds)
 
-        # (Old comment here claimed "everything breaks if artificialdataset
-        # is not the biggest" — verified false: the num_times_to_repeat math
-        # below scales every dataset to (amt_i / biggest_amt) * biggest_len
-        # samples, which is proportional to amt_i regardless of which
-        # dataset happens to be numerically largest. Confirmed in practice
-        # 2026-07-20 — panoptic_synth was the largest by raw sample count
-        # and the resulting mix was still correctly weighted.)
+        # num_times_to_repeat scales every dataset proportionally, whichever is largest.
 
-        # Skip any real dataset whose CSV hasn't been munged yet, rather than
-        # crashing outright — lets training start on whatever real data is
-        # actually ready (e.g. nikitha.csv is an internal capture that may
-        # not be located yet) instead of blocking on every source at once.
+        # Skip a real dataset whose CSV isn't munged yet rather than blocking all training.
         def b_if_present(csv_name, weight):
             csv_path = os.path.join(f"{datasets_basepath}/", csv_name)
             if os.path.exists(csv_path):
@@ -41,16 +32,13 @@ class AllOfTheDatasetsCombined(torch.utils.data.Dataset):
             else:
                 print(f"[CombinedDataset] Skipping {csv_name} — not found at {csv_path}")
 
-        # freihand and tom are held out for validation and testing respectively.
-        # They must never appear here — adding them would contaminate evaluation.
+        # freihand and tom are held out for val/test; adding them here contaminates evaluation.
         if not header.env_settings.loadfast:
             b_if_present("nikitha.csv", 0.6)
             b_if_present("panoptic_manual.csv", 0.8)
             b_if_present("panoptic_synth.csv", 0.8)
-            # Verified 2026-07-21 via diagnose_umetrack_landmark_order.py —
-            # landmark permutation confirmed against real skeleton data, not
-            # guessed (see convert_umetrack_to_rando_csv.py). Egocentric XR
-            # headset data, the most device-relevant real source available.
+            # Landmark permutation confirmed 2026-07-21 against real skeleton data, not guessed.
+            # Egocentric XR headset data, the most device-relevant real source available.
             b_if_present("umetrack.csv", 0.8)
 
         b(ArtificialDataset(), 2.0)

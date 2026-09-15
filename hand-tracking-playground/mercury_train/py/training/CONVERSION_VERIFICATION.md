@@ -1,16 +1,14 @@
 # ONNX -> PyTorch conversion: numerical verification
 
-Verified 2026-08-27. Supersedes the old note in the now-deleted
-`detection/DETECTION_PIPELINE.md`, which described a pre-refactor
-`load_monado_weights.py` (moved to `detection/_to_delete/`) rather than
-the `load_detnet_weights` / `load_keynet_weights` functions actually
-called by `trainer_detection.py` and `kpest_trainer.py` today.
+Verified 2026-08-27 against the `load_detnet_weights` /
+`load_keynet_weights` functions that `trainer_detection.py` and
+`kpest_trainer.py` actually call.
 
 ## What was run
 
 - DetNet: `python detection/verify_weights.py`
 - KeyNet: `python keypoint/load_weights.py` (the numerical cross-check is
-  already built into that file's own `__main__` block)
+  built into that file's own `__main__` block)
 
 Both scripts do the same thing: load the shipped ONNX weights into a
 freshly constructed model via the project's own loader function, then run
@@ -46,7 +44,6 @@ discrepancy between the two implementations.
 
 ## Re-running this
 
-Both scripts are self-contained given the repo's own dependencies
-(`torch`, `onnx`, `onnxruntime`, `numpy`) — no extra setup beyond
-whatever environment already runs `trainer_detection.py` /
-`kpest_trainer.py`.
+Both scripts are self-contained given the repo's own dependencies (`torch`,
+`onnx`, `onnxruntime`, `numpy`). No extra setup beyond whatever environment
+already runs `trainer_detection.py` / `kpest_trainer.py`.

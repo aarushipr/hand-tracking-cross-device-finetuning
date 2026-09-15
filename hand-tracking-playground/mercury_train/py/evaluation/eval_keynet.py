@@ -1,77 +1,9 @@
 """
-eval_keynet.py -- score a set of KeyNet weights against a HOT3D split.
-
-Moved here from py/training/keypoint/evaluate_keypoint.py. It now sits beside
-eval_detnet.py and takes its preprocessing from py/evaluation/
-preprocess_baseline.py, so neither evaluator reaches into a training module
-for the definition of the input convention.
-
-WHY A SEPARATE SCRIPT FROM TRAINING
------------------------------------
-Training reports a heatmap MSE loss. That is fine for watching convergence
-and useless in a results table: it is the mean squared difference between
-two blurred 22x22 grids, in no meaningful unit, and it cannot be compared
-against the zero-shot baseline without running a training job that need not
-exist. This script asks the question the thesis actually asks -- how far, in
-pixels, is each predicted joint from where it really is -- and answers it
-identically for any set of weights.
-
-DETERMINISM
------------
-The previous version of this script inherited its crops from the training
-dataset, which draws a fresh rotation over the full circle and a fresh
-radius multiplier for every sample, centred on randomly noised keypoints.
-Nothing seeded them. The baseline and the fine-tuned model were therefore
-scored on different crops of the same frames, and neither run reproduced
-itself. `--deterministic-crop` (the default) removes all three draws: the
-crop is centred on the ground truth at the centre of the rotation and radius
-distributions, so the input to both models is pixel-identical.
-`--stochastic-crop` restores the training-time behaviour as an ablation, and
-seeds it so at least it is reproducible.
-
-DECODING HEATMAPS TO COORDINATES
---------------------------------
-KeyNet outputs no coordinates. Per joint it outputs a 22x22 grid whose
-brightest region marks the location within the 128x128 crop. One cell spans
-128/22 = 5.82 px, so the brightest cell alone would quantise every
-measurement to ~5.8 px -- potentially coarser than the effect being
-measured, which would hide a real improvement inside rounding error.
-
-The peak cell is therefore located first and then refined by a weighted
-centroid over a 5x5 window around it, using clamped heatmap values as
-weights. This stays local, unlike a global soft-argmax, which stray
-activation elsewhere in the map pulls off target.
-
-The +0.5 offsets match maker_of_augmentations.make_heatmap_output(): the
-heatmap grid is built as `arange(size) + 0.5 - centre`, so cell i peaks when
-the target sits at i + 0.5 in heatmap units. Depth inverts
-`depth_value = ((z / 1.5 / 2) + 0.5) * 22` the same way in 1D.
-
-MEASURING THE MEASUREMENT
--------------------------
-Before scoring any model, the ground-truth heatmaps are pushed through the
-identical decoder and compared against the exact coordinates in
-`gt_joint_locs`. A perfect model would score exactly that, so it is the
-noise floor of the whole experiment. Any difference between two models that
-is not comfortably larger than this floor is not a result, and it is printed
-beside every evaluation for that reason.
-
-FAIRNESS
---------
-HOT3DKeypointDataset can supply `input_predicted_keypoints`, a deliberately
-noised copy of the ground truth standing in for what a tracker would know
-from the previous frame. Feeding it during evaluation leaks ground truth
-into the input, so it is withheld by default -- the same thing
-validatoor.validation_loop does with use_prediction=False. Both models are
-handicapped identically. --use-predicted-input restores it as an ablation.
-
-Usage:
-    python py/evaluation/eval_keynet.py --weights monado --split test_mixed \
-        --out results/keynet_baseline_mixed.json
-
-    python py/evaluation/eval_keynet.py \
-        --weights py/training/keypoint/checkpoints/checkpoint_best.pth \
-        --split test_mixed --out results/keynet_finetuned_mixed.json
+Scores a set of KeyNet weights against a HOT3D split, in pixels rather than the
+heatmap MSE training reports. Crops are deterministic so both models see
+pixel-identical input (--stochastic-crop restores the training draw), peaks are
+refined by a 5x5 weighted centroid, and the decoder's own error floor is printed
+beside every result. Predicted-keypoint input is withheld unless asked for.
 """
 import argparse
 import json
@@ -113,9 +45,7 @@ JOINT_NAMES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Heatmap decoding
-# ---------------------------------------------------------------------------
+# --- Heatmap decoding ----------------------------------------------------------
 
 def _refine_1d(values, peak_idx, radius):
     """Weighted-centroid refinement of a 1D peak.
@@ -139,9 +69,7 @@ def decode_xy(hmaps):
     peak = clamped.reshape(b, j, h * w).argmax(dim=-1)
     peak_y = torch.div(peak, w, rounding_mode="floor")
     peak_x = peak % w
-    # The heatmap is a rank-1 outer product of two 1D Gaussians by
-    # construction (heatmap_1d.two_heatmaps_to_2d), so the marginals are the
-    # right thing to take a centroid over.
+    # The heatmap is a rank-1 outer product of two 1D Gaussians, so marginals are right.
     cx = _refine_1d(clamped.sum(dim=2), peak_x, REFINE_RADIUS)
     cy = _refine_1d(clamped.sum(dim=3), peak_y, REFINE_RADIUS)
     return torch.stack([(cx + 0.5) * PX_PER_CELL, (cy + 0.5) * PX_PER_CELL], dim=-1)
@@ -154,23 +82,17 @@ def decode_depth(hmaps):
     return (d / HEATMAP_SIDE - 0.5) * 2.0 * DEPTH_HALF_RANGE
 
 
-# ---------------------------------------------------------------------------
-# Model
-# ---------------------------------------------------------------------------
+# --- Model ---------------------------------------------------------------------
 
 def build_model(weights, device):
     model = KeyNet.KeyNet()
-    # Needed on both branches: this gives the InvertedResidual convs
-    # (bias=False) real bias parameters, matching what kpest_trainer.py does
-    # before it trains or checkpoints anything.
+    # Needed on both branches: gives the bias=False convs real bias params.
     load_keynet_weights(model)
 
     if weights == "monado":
         source = "monado (zero-shot, no fine-tuning)"
     else:
-        # weights_only=False: checkpoints written by this project and loaded
-        # by it; the torch 2.6 default rejects them for holding a plain
-        # Python/numpy scalar. See kpest_trainer.py.
+        # weights_only=False: torch 2.6's default rejects our own checkpoints. See kpest_trainer.py.
         checkpoint = torch.load(weights, map_location="cpu", weights_only=False)
         # Written from model.module.state_dict(), so no "module." prefix.
         model.load_state_dict(checkpoint.get("state_dict", checkpoint))
@@ -220,16 +142,14 @@ def device_labels_for_dataset(dataset):
     than adding a public accessor to that class, the same pattern already
     used by measure_hand_presence_rate.py. It only lines up with evaluate()'s
     scored samples because the dataloader built in main() below is
-    shuffle=False, drop_last=False -- evaluate() matches these labels to
+    shuffle=False, drop_last=False; evaluate() matches these labels to
     batches purely by position.
     """
     per_seq_device = [hot3d_split.headset_of(d) for d in dataset.sequence_dirs]
     return np.array([per_seq_device[int(i)] for i in dataset._seq_idx], dtype=object)
 
 
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
+# --- Scoring -------------------------------------------------------------------
 
 def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
              device_labels=None):
@@ -237,7 +157,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
     A joint is excluded from scoring if its ground truth falls outside the
     128x128 crop (its Gaussian would sit off the grid entirely, so no
     prediction could match it), or if HOT3DKeypointDataset marked it invalid
-    at index time -- behind the camera, or outside the camera model's valid
+    at index time, behind the camera, or outside the camera model's valid
     region (see _project_hand). The second check matters as of index format
     version 3: an invalid joint's stored position is a geometry-safe
     placeholder kept only so cropping stays stable, and that placeholder can
@@ -265,10 +185,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
             xy_valid = doct["xy_valid_per_joint"].to(device).bool()
             depth_valid = doct["depth_valid_per_joint"].to(device).bool()
 
-            # device_labels (built in main() via device_labels_for_dataset) is
-            # indexed in dataset order; this DataLoader is shuffle=False,
-            # drop_last=False, so batch i always covers dataset indices
-            # [sample_offset : sample_offset + bs].
+            # device_labels is in dataset order, valid only because this loader is shuffle=False.
             bs = image.shape[0]
             batch_devices = (device_labels[sample_offset:sample_offset + bs]
                               if device_labels is not None else None)
@@ -285,9 +202,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
 
             gt_px, gt_z = gt_locs[..., :2], gt_locs[..., 2]
 
-            # _empty_sample() puts all 21 joints at one point. An affine crop
-            # maps identical points to identical points, so the signature
-            # survives cropping and identifies those samples reliably.
+            # _empty_sample() puts all 21 joints at one point, and an affine crop preserves that.
             spread = (gt_px.max(dim=1).values - gt_px.min(dim=1).values).max(dim=1).values
             sample_ok = spread > 1.0
             n_degenerate += int((~sample_ok).sum())
@@ -336,9 +251,7 @@ def evaluate(model, dataloader, device, use_predicted_input, limit_batches=None,
     }
 
     if device_batches:
-        # Broadcast each sample's device label across its 21 joints so it can
-        # be indexed by the same flat joint-level masks (m, dm) used above --
-        # one device string per scored joint, not per sample.
+        # One device string per scored joint, not per sample, to match the flat masks.
         sample_devices = np.concatenate(device_batches)
         joint_devices = np.repeat(sample_devices[:, None], err.shape[1], axis=1).reshape(-1)
         dev_e, dev_m = joint_devices[m], joint_devices[dm]
@@ -467,9 +380,7 @@ def main():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model, source = build_model(args.weights, device)
 
-    # Valid only because the DataLoader above is shuffle=False, drop_last=False:
-    # evaluate() lines these labels up with scored samples purely by batch
-    # position (see device_labels_for_dataset / evaluate docstrings).
+    # Valid only because the DataLoader is shuffle=False, drop_last=False.
     device_labels = device_labels_for_dataset(dataset)
 
     result = evaluate(model, dataloader, device, args.use_predicted_input, args.limit,

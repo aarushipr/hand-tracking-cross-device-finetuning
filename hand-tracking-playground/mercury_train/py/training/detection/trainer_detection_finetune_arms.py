@@ -1,84 +1,11 @@
 """
-trainer_detection_finetune_arms.py -- DetNet fine-tuning with a selectable
-starting point and a selectable training set. One script, so that every
-comparison in the thesis is produced by the same loss, the same frozen
-backbone, the same batch size and the same stopping procedure, and the runs
-differ only in the two variables named below.
-
-Additive only. trainer_detection.py (phase 1, HOT3D) and
-trainer_detection_phanesim.py (the naive phase 2) are both reported results and
-are not touched by this file; it never writes to their checkpoint directories.
-
-------------------------------------------------------------------------------
-AD4_INIT -- what the network starts from
-------------------------------------------------------------------------------
-  default (default value)  Monado Mercury's shipped ONNX weights, exactly as
-                           trainer_detection.py starts. Nothing else is loaded.
-  phase1                   Continue from checkpoints_train_mixed/
-                           checkpoint_best.pth, i.e. the HOT3D-fine-tuned model.
-
-AD4_INIT also selects the hyperparameters, because the two cases want different
-ones for principled reasons rather than by preference:
-
-  With AD4_INIT=default the run is a PEER of phase 1 -- the same starting
-  weights, the same frozen backbone, a different training set -- so it must use
-  phase 1's own schedule and optimiser settings unchanged, or the comparison
-  measures the schedule as well as the data. That means a bare
-  torch.optim.Adam(), i.e. PyTorch's default lr=1e-3, and MAX_EPOCHS /
-  EARLY_STOPPING_PATIENCE imported from trainer_detection.py (120 / 8).
-
-  With AD4_INIT=phase1 the run continues from an already-converged model, where
-  a bare Adam() at 1e-3 is what produced the naive phase 2's collapse: Adam
-  normalises by gradient magnitude, so its early steps move every trainable
-  parameter by roughly the learning rate regardless of how small the gradient
-  is, and one Phanesim epoch is ~784 steps (50,185 samples / batch 64). This
-  case therefore defaults to lr=1e-4 and a time-boxed 30 / 5.
-
-AD4_LR, AD4_MAX_EPOCHS and AD4_PATIENCE override whichever case is active.
-
-------------------------------------------------------------------------------
-AD4_ARM -- what the network trains on
-------------------------------------------------------------------------------
-  mixed     HOT3D train_mixed TRAIN sequences + Phanesim (plain ConcatDataset).
-  phanesim  Phanesim alone.
-  hot3d     HOT3D train_mixed TRAIN sequences alone. With AD4_INIT=default this
-            reproduces phase 1; with AD4_INIT=phase1 it is the control that
-            separates "more HOT3D training helped" from "Phanesim helped".
-
-Measured sizes on this cluster (2026-09-09, frame_stride=5):
-    HOT3D detection train   295,466 samples (212 sequences)
-    HOT3D detection val      33,680 samples (23 sequences)
-    Phanesim detection       50,185 samples (both roots pooled, all 640x480)
-so the mixed arm is ~85.5% HOT3D by sample count. No re-weighting is applied:
-an earlier draft rebalanced the two to 50/50 with a repeat wrapper, which would
-have cut HOT3D's share of each epoch about six times below the natural ratio and
-weakened exactly the anchoring that mixing exists to provide. The realised ratio
-is printed at startup rather than assumed.
-
-------------------------------------------------------------------------------
-AD4_SELECT -- which validation loss drives early stopping and checkpoint_best
-------------------------------------------------------------------------------
-  Defaults to phanesim when AD4_INIT=default, and to hot3d otherwise.
-
-  The naive phase 2 selected on Phanesim val while being scored on HOT3D, so its
-  checkpoint_best.pth optimised a criterion with no knowledge of the evaluation
-  domain. That is a bug when continuing from a HOT3D-tuned model, which is why
-  AD4_INIT=phase1 selects on HOT3D.
-
-  For AD4_INIT=default + AD4_ARM=phanesim it is not a bug but a choice: selecting
-  on Phanesim keeps real data out of every training decision, so the resulting
-  model is honestly describable as trained purely on synthetic data. Both losses
-  are measured and logged every epoch either way, and BOTH checkpoint_best.pth
-  (by AD4_SELECT) and checkpoint_best_hot3d.pth are written, so either selection
-  can be reported without a second run.
-
-Preprocessing is unchanged and is not a function of AD4_INIT: the input
-convention belongs to the weights, not to the data, and is defined once in
-py/evaluation/preprocess_baseline.py. Both dataset loaders already reproduce it
-through the same calls (_pp.rotate_upright + augmentation.augment_image).
-
-Checkpoints go to checkpoints_monado_<arm>/ (AD4_INIT=default) or
-checkpoints_phase2_<arm>/ (AD4_INIT=phase1).
+DetNet fine-tuning with a selectable starting point and training set, so every
+comparison comes from the same loss, frozen backbone and stopping procedure.
+Additive only: phase 1 and the naive phase 2 are never written to. AD4_INIT picks
+the weights and with them the schedule, since Adam at 1e-3 from a converged model
+is what collapsed the naive phase 2. AD4_ARM picks mixed / phanesim / hot3d,
+unweighted, so the mixed arm stays about 85% HOT3D. AD4_SELECT picks which
+validation loss drives stopping; both are logged and both checkpoints written.
 """
 
 import os
@@ -105,9 +32,7 @@ import wandb
 modelinputW = header.model_input_width
 modelinputH = header.model_input_height
 
-# Same clip-level Phanesim val stride as trainer_detection_phanesim.py, so the
-# Phanesim val curve here is measured on the same held-out clips the naive arm
-# used and the two are directly comparable.
+# Same Phanesim val clips as trainer_detection_phanesim.py, so the curves compare.
 VAL_CLIP_STRIDE = 20
 
 ARMS = ("mixed", "phanesim", "hot3d")
@@ -146,9 +71,7 @@ def main():
             f"[finetune] AD4_SELECT=phanesim with AD4_ARM={arm} has no Phanesim "
             f"data to select on.")
 
-    # Schedule: phase 1's own when starting from Monado's weights (this run is
-    # then a peer of phase 1 and must not differ in schedule), time-boxed
-    # otherwise. See the module docstring.
+    # Schedule: phase 1's own when starting from Monado's weights, time-boxed otherwise.
     if init == "default":
         max_epochs = int(os.environ.get("AD4_MAX_EPOCHS", str(MAX_EPOCHS)))
         patience = int(os.environ.get("AD4_PATIENCE", str(EARLY_STOPPING_PATIENCE)))
@@ -183,13 +106,8 @@ def main():
               f"{len(phanesim_val_clips)} val clips")
 
     # ---------------- HOT3D ----------------
-    # Loaded in every configuration: even when HOT3D is not trained on and not
-    # selected on, its val loss is measured each epoch so the run produces the
-    # real-domain trajectory the thesis reports.
-    #
-    # list_sequence_dirs(..., "train_mixed") lists only the train participants,
-    # so hot3d_split.TEST_MIXED_PARTICIPANTS -- the sequences eval_detnet.py
-    # scores against -- can never reach this training set or this val set.
+    # Loaded always: its val loss is measured each epoch for the real-domain trajectory.
+    # "train_mixed" lists only train participants, so test sequences can never leak in.
     train_pool_dirs = list_sequence_dirs(local_config.hot3d_dataset_root, TRAIN_SPLIT)
     if not train_pool_dirs:
         raise RuntimeError(
@@ -245,11 +163,7 @@ def main():
         print(f"[finetune] Phanesim-only training set: "
               f"{len(train_dataset)} samples/epoch")
 
-    # worker_init_fn is required whenever HOT3D samples are in a loader:
-    # DataLoader workers are forked, and without it they would inherit the
-    # parent's already-open VRS handles. It only clears each worker's provider
-    # cache, so it is harmless for Phanesim samples and every loader carries it
-    # unconditionally rather than making its presence depend on the arm.
+    # worker_init_fn on every loader: forked workers would otherwise share open VRS handles.
     def make_loader(dataset, shuffle):
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle,
@@ -263,13 +177,7 @@ def main():
 
     # ---------------- Model ----------------
     model = DetNet.DetNet()
-    # load_detnet_weights() is what loads Monado's shipped ONNX weights, and it
-    # runs in BOTH cases. With init=phase1 its weight VALUES are overwritten
-    # immediately below, but the call is still required first: load_weights.py's
-    # _load_conv_bn() dynamically ATTACHES a .bias Parameter to backbone conv
-    # layers that InvertedResidual builds with bias=False, so a bare
-    # DetNet.DetNet() has fewer parameters than any checkpoint saved after this
-    # call and load_state_dict(strict=True) would fail on every added bias.
+    # load_detnet_weights() first even with init=phase1: it attaches the .bias params.
     load_detnet_weights(model)
     model = torch.nn.DataParallel(model).to(device)
 
@@ -286,8 +194,7 @@ def main():
         print("[finetune] Starting from Monado Mercury's shipped ONNX weights "
               "(no checkpoint loaded)")
 
-    # Backbone frozen in every configuration, matching phase 1 and the naive
-    # phase 2. Only the head trains.
+    # Backbone frozen in every configuration, as in phase 1. Only the head trains.
     for param in model.module.backbone.parameters():
         param.requires_grad = False
     model.module.backbone.eval()
@@ -298,8 +205,7 @@ def main():
         optimizer = torch.optim.Adam(trainable_params, lr=lr)
         print(f"[finetune] Adam(lr={lr}) -- explicit AD4_LR override")
     elif init == "default":
-        # Bare Adam(), byte-for-byte what trainer_detection.py does. Matching
-        # phase 1 exactly is the point of this configuration.
+        # Bare Adam(), byte-for-byte what trainer_detection.py does; that is the point here.
         optimizer = torch.optim.Adam(trainable_params)
         print("[finetune] Adam() with PyTorch defaults (lr=1e-3) -- matches "
               "trainer_detection.py, so this run differs from phase 1 only in "
@@ -344,9 +250,7 @@ def main():
             print(f"Training {idx}/{length}")
             train_batch(device, batch, loss_fn, optimizer, model)
 
-        # Both losses are measured every epoch regardless of which one selects,
-        # so the run records the real-domain trajectory even when it is not
-        # optimising against it.
+        # Both losses every epoch, so the real-domain trajectory is recorded either way.
         hot3d_loss = validate_epoch(device, hot3d_val_dataloader, loss_fn, model)
         logged = {"val_loss_hot3d": hot3d_loss,
                   "epochs_without_improvement": epochs_without_improvement}
@@ -392,17 +296,14 @@ def main():
             state["val_loss_phanesim"] = phanesim_loss
         save_checkpoint(state, checkpoint_dir)
 
-        # Unconditional at epoch 0 (not only every 10th) so the epoch-0 point
-        # exists for the trajectory table even if the run is cut short.
+        # Unconditional at epoch 0 so the trajectory table has that point if the run is cut.
         if epoch == 0 or epoch % 10 == 0:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, f"checkpoint_{epoch}.pth"))
         if is_best:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, "checkpoint_best.pth"))
-        # Written separately so the HOT3D-optimal checkpoint is available even
-        # when selection is deliberately blind to HOT3D. Identical to
-        # checkpoint_best.pth whenever select == "hot3d".
+        # Separate file so the HOT3D-optimal checkpoint exists even when selection ignores HOT3D.
         if is_best_hot3d:
             shutil.copy(os.path.join(checkpoint_dir, "checkpoint.pth"),
                         os.path.join(checkpoint_dir, "checkpoint_best_hot3d.pth"))

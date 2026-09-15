@@ -10,7 +10,7 @@
 #SBATCH --error=/storage/slurm/logs/slurm-%j.out
 
 # ---------------------------------------------------------------------------
-# Smoke test ONLY -- AD4_LOADFAST=1, 2 train clips + 1 val clip, capped at 2
+# Smoke test ONLY; AD4_LOADFAST=1, 2 train clips + 1 val clip, capped at 2
 # epochs, writes to checkpoints_loadfast_phanesim/. Exists purely to prove
 # kpest_trainer_phanesim.py runs end to end (loads the phase-1 checkpoint,
 # trains, validates, saves a checkpoint) before the real multi-day job in
@@ -30,11 +30,11 @@ export LD_LIBRARY_PATH="$HOME/lib_shim:$CONDA_PREFIX/lib:/storage/software/openc
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 
-# Disable GUI -- there is no display on the cluster. This is required;
+# Disable GUI; there is no display on the cluster. This is required;
 # without it, visualizer.py's periodic display_and_log_output() calls
 # cv2.imshow and crashes with "The function is not implemented" the
 # first time it fires. Copied from train.sbatch (phase 1's own working
-# KeyNet job), which already has this -- missed it when first writing
+# KeyNet job), which already has this; missed it when first writing
 # this script since trainer_detection_phanesim.py has no GUI code path
 # at all. Confirmed 2026-09-09 (job 1700705).
 export AD4_ENABLEGUI=0
